@@ -413,7 +413,12 @@ export class RoomNet {
   private onControl(peer: Peer, msg: ControlMessage): void {
     // Banned keys may only ever attempt a join — which handleJoinRequest
     // answers with the full ban entry so their app can show the ban
-    // screen. Anything else from a banned key cuts the connection.
+    // screen. Everything else from a banned key is IGNORED, not cut: the
+    // joiner's automatic sync messages (chat manifest, roster pulls)
+    // arrive BEFORE its join_request (first sent as soon as the creator
+    // is reachable) — closing on them meant the join_request never got
+    // through and the banned user never learned why. The idle watchdog
+    // still closes the connection if they never attempt a join.
     if (
       this.ctx.localBans.has(`${this.roomId}:${peer.key}`) &&
       msg.t !== 'hello' &&
@@ -421,8 +426,6 @@ export class RoomNet {
       msg.t !== 'ping' &&
       msg.t !== 'pong'
     ) {
-      this.ctx.log('info', `cutting banned peer ${peer.key.slice(0, 8)} (non-join traffic)`)
-      peer.close()
       return
     }
     switch (msg.t) {

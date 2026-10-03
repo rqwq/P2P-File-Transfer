@@ -29,14 +29,14 @@ export const RESERVED_HASH_B64 =
 // (join admission or rename) — exact string on the wire and in the UI.
 export const NAME_TAKEN_ERROR = 'ERR: name not available'
 
-// Extensions that trigger the stronger confirmation variant (spec 8.2).
+// Extensions that trigger the stronger confirmation variant.
 export const RISKY_EXTENSIONS = new Set([
   'exe', 'scr', 'bat', 'cmd', 'com', 'lnk', 'msi', 'js', 'jse', 'vbs',
   'vbe', 'ps1', 'hta', 'pif', 'cpl', 'reg', 'jar', 'wsf', 'url'
 ])
 
 export const RISKY_CONFIRM_SECONDS = 15
-export const SAFE_CONFIRM_SECONDS = 10
+export const SAFE_CONFIRM_SECONDS = 7
 
 // Transfer engine tuning.
 export const CHUNK_SIZE = 512 * 1024
@@ -44,20 +44,20 @@ export const CHUNK_WINDOW = 16
 export const MAX_CONTROL_FRAME = 256 * 1024
 export const BINARY_HEADER_CAP = 512
 
-// Connection hygiene (spec 11).
+// Connection hygiene.
 export const HANDSHAKE_TIMEOUT_MS = 10_000
 export const IDLE_TIMEOUT_MS = 60_000
 export const PING_INTERVAL_MS = 20_000
 export const MAX_CONNECTIONS_TOTAL = 256
 
-// Preview loads whole files into RAM (spec 8.3). Require the file to fit
+// Preview loads whole files into RAM. Require the file to fit
 // within this fraction of currently free RAM.
 export const PREVIEW_MEM_SAFETY = 0.5
 
 // Free-space headroom required on top of the incoming payload.
 export const DISK_SAFETY_BYTES = 64 * 1024 * 1024
 
-// Default per-room chat limits (spec 9), creator-configurable.
+// Default per-room chat limits, creator-configurable.
 export const DEFAULT_CHAT_LIMITS = {
   textLength: 500,
   imageBytes: 5 * 1024 * 1024,
@@ -128,7 +128,13 @@ export interface SuspectEntry {
   reasons: string[]
   marked?: boolean
 }
-export const SUSPECTED: SuspectEntry[] = []
+export const SUSPECTED: SuspectEntry[] = [
+  {
+    hwid: 'C01F29C831E40549F53680A1592D107E35D93C5D15C0060BFA9E69BCA66AF4E8',
+    reasons: ['Being a nigger', 'Negro'],
+    marked: false
+  }
+]
 
 // Build-time app-level blocklist (owner decision, baked into the build).
 // Checked against the local machine's HWID hash AND its IPv4 addresses at

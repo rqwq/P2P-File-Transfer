@@ -19,9 +19,10 @@ const ICON_OF: Record<BadgeInfo['id'], { icon: Parameters<typeof Icon>[0]['name'
   untrusted: { icon: 'thumbsDown', color: 'var(--badge-untrusted)' }
 }
 
-// The Developer badge is a wrench at a right angle, stroked with a real
-// animated gradient: the two stops cycle orange → red → green out of
-// phase, so a moving gradient band flows along the stroke.
+// The Developer badge is a wrench with its head in the top-right corner,
+// stroked with a real animated gradient: the two stops cycle orange →
+// red → green out of phase, so a moving gradient band flows along the
+// stroke.
 function DeveloperGradientIcon(props: { size: number }): React.JSX.Element {
   const gradId = useId()
   return (
@@ -47,10 +48,7 @@ function DeveloperGradientIcon(props: { size: number }): React.JSX.Element {
           </stop>
         </linearGradient>
       </defs>
-      {/* wrench at a right angle */}
-      <g transform="rotate(90 12 12)">
-        <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-      </g>
+      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
     </svg>
   )
 }

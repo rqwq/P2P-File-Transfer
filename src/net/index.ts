@@ -277,13 +277,14 @@ function routeWireEvent(kind: string, payload: Record<string, unknown>): void {
   }
 }
 
-// The join-request loop: re-sends the request while the creator is
-// reachable but has not answered. Joins are instant (the creator answers
-// allow/reject as soon as the request lands), so this only covers the
-// network-contact window — no staff prompt is involved anymore.
+// The join-request loop: sends the request the moment the creator is
+// reachable, then re-sends every 3s until they answer. Joins are instant
+// (the creator answers allow/reject as soon as the request lands), so
+// this only covers the network-contact window — no staff prompt is
+// involved anymore.
 function startJoinCycle(room: RoomNet, code: string, reason: string): NodeJS.Timeout {
   let joinAnnounced = false
-  return setInterval(() => {
+  const tick = (): void => {
     const peer = room.peerOf(room.creatorKey)
     if (peer) {
       if (!joinAnnounced) {
@@ -301,7 +302,9 @@ function startJoinCycle(room: RoomNet, code: string, reason: string): NodeJS.Tim
         reason
       })
     }
-  }, 3_000)
+  }
+  tick()
+  return setInterval(tick, 3_000)
 }
 
 function teardownJoin(room: RoomNet): void {
@@ -616,7 +619,12 @@ function mainDispatch(msg: Envelope): void {
       room?.broadcast({ t: 'ban', roomId: room.roomId, entry })
       if (room) {
         ctx.localBans.add(`${room.roomId}:${entry.targetKey}`)
-        room.peerOf(entry.targetKey)?.close()
+        // The banned peer's socket is closed DELAYED: destroying it in the
+        // same tick as the ban broadcast discards the buffered write, so
+        // the target never received the ban — they just silently went
+        // offline instead of being kicked with the ban screen.
+        const target = room.peerOf(entry.targetKey)
+        if (target) setTimeout(() => target.close(), 1_000)
       }
       return
     }

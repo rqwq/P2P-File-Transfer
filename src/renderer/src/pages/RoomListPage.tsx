@@ -149,10 +149,10 @@ export function RoomListPage(): React.JSX.Element {
           <div className="join-progress">
             <span className="spinner small" />
             <span>
-              Reaching the room creator… {joinElapsed}s
+              Connecting to the room creator… {joinElapsed}s
               <br />
               <span className="join-progress-sub">
-                You join instantly once the creator is reached — no one has to click anything.
+                The creator only has to be online — the join completes on its own.
               </span>
             </span>
           </div>
