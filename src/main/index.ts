@@ -1,5 +1,6 @@
 import { app, clipboard, ipcMain, shell } from 'electron'
 import fs from 'node:fs'
+import os from 'node:os'
 import { APP_ID, APP_BANS } from '../shared/constants'
 import type { AppBanInfo, BootState, CallResult, ChatMessageView } from '../shared/api'
 import type { WireBanEntry, WireMember, WorkerRequest } from '../shared/worker'
@@ -56,15 +57,49 @@ function computeStage(): BootState['stage'] {
   return 'ready'
 }
 
+// The machine's IPv4 addresses — the second match key for the hardcoded
+// APP_BANS list (a reinstall regenerates nothing here: same machine, same
+// addresses, ban still applies).
+function localIpv4s(): string[] {
+  const out: string[] = []
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const addr of addrs ?? []) {
+      if (addr.family === 'IPv4') out.push(addr.address)
+    }
+  }
+  return out
+}
+
 function checkAppBan(): void {
+  const ips = localIpv4s()
+  const active = (until: number | null): boolean => until === null || until > Date.now()
   for (const b of APP_BANS) {
-    if (b.hwid === hwidHash && (b.until === null || b.until > Date.now())) {
-      appBanInfo = { reason: b.reason, byName: 'App Moderator', byBadges: appBanIssuerBadges(null), expiresAt: b.until }
+    if (!active(b.until)) continue
+    // HWID match, or IP match (for installs on the same machine/network
+    // regardless of what the database says).
+    if (b.hwid === hwidHash || (b.ips ?? []).some((ip) => ips.includes(ip))) {
+      appBanInfo = {
+        reason: b.reason,
+        byName: 'App Moderator',
+        byBadges: appBanIssuerBadges(null),
+        targetHwid: hwidHash,
+        targetIps: ips,
+        expiresAt: b.until
+      }
       return
     }
   }
   const row = roomsDb.getAppBanByHwid(hwidHash)
-  if (row) appBanInfo = { reason: row.reason, byName: row.byName, byBadges: appBanIssuerBadges(row.byHwid), expiresAt: row.until }
+  if (row) {
+    appBanInfo = {
+      reason: row.reason,
+      byName: row.byName,
+      byBadges: appBanIssuerBadges(row.byHwid),
+      targetHwid: hwidHash,
+      targetIps: ips,
+      expiresAt: row.until
+    }
+  }
 }
 
 function pushBoot(): void {
@@ -88,9 +123,7 @@ function pushSettings(): void {
 
 function pushRooms(): void {
   const joined = roomsDb.summaries(roomStateCache.onlineSets(roomsDb.listRooms().map((r) => r.roomId)))
-  // Pending/rejected applications render as room cards with hidden
-  // member data ("unavailable" until accepted).
-  pushToRenderer('rooms', [...joined, ...roomsDb.pendingSummaries()])
+  pushToRenderer('rooms', joined)
 }
 
 function pushAllRoomStates(): void {
@@ -204,11 +237,6 @@ function wireWorker(): void {
 
   net.on('ready', (msg: { publicKey: string }) => {
     setMyPublicKey(msg.publicKey)
-    // A (re)spawned worker always starts as "available": re-assert the
-    // session availability FIRST. Messages are FIFO, so this is processed
-    // before rooms:restore below — an offline (or banned) user never
-    // flashes online to their rooms, even after a worker respawn.
-    if (!available) net.send({ kind: 'availability:set', online: false })
     // Seed own presence for every room we belong to: presence events only
     // exist for remote peers, so without this you never appear online to
     // yourself. The renderer's own dot also follows the availability
@@ -247,31 +275,39 @@ function wireWorker(): void {
       kind: 'bans:local',
       bans: roomsDb.listLocalBans().map((b) => ({ roomId: b.roomId, targetKey: b.targetKey }))
     })
-    // A banned install never comes online: no room is restored, so the
-    // worker announces nothing and dials no one. Mid-session bans already
-    // left every group on receipt; boot-time enforcement (below) wiped the
-    // local room data, so there is nothing to restore anyway.
-    if (!appBanInfo) {
+    // A banned install never becomes reachable, but it still says goodbye:
+    // every room is restored in LEAVE mode — the worker announces each
+    // room once, tells every peer (and dials the creator) that this
+    // member is gone via member_left, then closes the room for good.
+    // After that the local room data is wiped so the banned install owns
+    // nothing. This is what makes the user disappear from the groups even
+    // after deleting and reinstalling the app.
+    if (appBanInfo) {
+      const rooms = roomsDb.listRooms().map((r) => ({
+        roomId: r.roomId,
+        code: r.code,
+        transport: r.transport,
+        vpnIp: roomsDb.getRoomVpnIp(r.roomId) ?? r.vpnIp,
+        pending: false
+      }))
+      net.send({ kind: 'rooms:restore', rooms, leave: true })
+      for (const room of roomsDb.listRooms()) moderation.wipeRoom(room.roomId)
+      for (const p of roomsDb.listPendingRooms()) roomsDb.deletePendingByRoom(p.roomId)
+    } else {
+      // A (re)spawned worker always starts as "available": re-assert the
+      // session availability FIRST. Messages are FIFO, so this is
+      // processed before rooms:restore below — an offline user never
+      // flashes online to their rooms, even after a worker respawn.
+      if (!available) net.send({ kind: 'availability:set', online: false })
       net.send({
         kind: 'rooms:restore',
-        rooms: [
-          ...roomsDb.listRooms().map((r) => ({
-            roomId: r.roomId,
-            code: r.code,
-            transport: r.transport,
-            vpnIp: roomsDb.getRoomVpnIp(r.roomId) ?? r.vpnIp,
-            pending: false
-          })),
-          // Pending applications re-dial the creator on every start until a
-          // decision arrives (the applicant's pull replaces a push).
-          ...roomsDb.listPendingRooms().map((p) => ({
-            roomId: p.roomId,
-            code: p.code,
-            transport: 'dht' as const,
-            vpnIp: null,
-            pending: true
-          }))
-        ]
+        rooms: roomsDb.listRooms().map((r) => ({
+          roomId: r.roomId,
+          code: r.code,
+          transport: r.transport,
+          vpnIp: roomsDb.getRoomVpnIp(r.roomId) ?? r.vpnIp,
+          pending: false
+        }))
       })
     }
     // Seed the worker's roster mirrors from the local caches so presence,
@@ -441,7 +477,7 @@ function wireWorker(): void {
   const handleRequest = (msg: WorkerRequest): void => {
     switch (msg.kind) {
       case 'mod:admitJoin': {
-        void moderation.admitJoin(msg.roomId, msg.joiner).then((res) => {
+        void moderation.admitJoin(msg.roomId, msg.joiner, msg.reason).then((res) => {
           if (res.allow) {
             const room = roomsDb.getRoom(msg.roomId)
             const wireSettings = roomStateCache.getRoomSettings(msg.roomId)
@@ -554,7 +590,7 @@ function wireWorker(): void {
       applicantKey: string
       name: string
       hwid: string
-      status: 'pending' | 'approved' | 'rejected'
+      status: 'pending' | 'approved' | 'rejected' | 'banned'
       reason: string | null
       decidedByName: string | null
       decidedAt: number | null
@@ -611,6 +647,31 @@ function wireWorker(): void {
     }
   })
 
+  // A suspicion arrived over the wire (staff marked someone suspected, or
+  // marked existing suspicions as handled). Rows are append-only; the
+  // badge refresh comes from the rebuilt room state.
+  net.on('suspect:received', (msg: {
+    roomId: string
+    targetKey: string
+    targetHwid: string
+    reason: string | null
+    byName: string
+    marked: boolean
+  }) => {
+    if (msg.marked) {
+      roomsDb.markSuspicionHandled(msg.targetHwid)
+    } else if (msg.reason) {
+      roomsDb.addSuspicion({
+        roomId: msg.roomId,
+        targetKey: msg.targetKey,
+        targetHwid: msg.targetHwid,
+        reason: msg.reason,
+        byName: msg.byName
+      })
+    }
+    pushRoomState(msg.roomId)
+  })
+
   net.on('member:left', (msg: { roomId: string; key: string }) => {
     const room = roomsDb.getRoom(msg.roomId)
     // The leaver drops out of the member list immediately: the creator
@@ -655,19 +716,6 @@ function wireWorker(): void {
     pushRoomState(msg.roomId)
   })
 
-  // The join window expired: the room card goes to "pending" and the
-  // worker keeps retrying until staff decide.
-  net.on('room:pending', (msg: { roomId: string; code: string }) => {
-    roomsDb.upsertPendingRoom({
-      code: msg.code,
-      roomId: msg.roomId,
-      name: `Room ${msg.roomId.slice(0, 8)}`,
-      status: 'pending',
-      reason: null
-    })
-    pushRooms()
-  })
-
   // A roster member was caught advertising a mismatched app build. Only
   // the creator enforces (auto group-ban + untrusted flag); the report
   // was already broadcast to the room by the worker.
@@ -703,6 +751,8 @@ function wireWorker(): void {
         reason: msg.entry.reason,
         byName: msg.entry.byName,
         byBadges: appBanIssuerBadges(msg.entry.byHwid),
+        targetHwid: hwidHash,
+        targetIps: localIpv4s(),
         expiresAt: msg.entry.until
       }
       // Only an ACTIVE ban enforces: leaving every group and the offline
@@ -855,15 +905,13 @@ if (!gotLock) {
     checkAppBan()
     if (appBanInfo) {
       // Boot-time enforcement of an active ban: locked offline (the
-      // availability toggle can never leave Offline) and out of every
-      // group — a banned member must not reappear in anyone's roster.
-      // Mid-session bans already did this on receipt; this also covers
-      // build-time blocklist entries and any room data left from a
-      // session that never got the wire-delivered leave out.
+      // availability toggle can never leave Offline). The room data is
+      // NOT wiped here — the worker restores every room in LEAVE mode
+      // once it is ready (connect, tell each group this member is gone,
+      // close), and only then the local copies are gone with the wire
+      // goodbye.
       available = false
       roomStateCache.setSelfOnline(false)
-      for (const room of roomsDb.listRooms()) moderation.wipeRoom(room.roomId)
-      for (const p of roomsDb.listPendingRooms()) roomsDb.deletePendingByRoom(p.roomId)
     }
 
     // Receive folder: existence is re-checked on every app start (spec 8.7).

@@ -9,12 +9,50 @@ import { Icon } from './Icon'
 // and overlapped by neighboring panes.
 
 const ICON_OF: Record<BadgeInfo['id'], { icon: Parameters<typeof Icon>[0]['name']; color: string }> = {
+  developer: { icon: 'wrench', color: 'var(--badge-developer)' },
   creator: { icon: 'crown', color: 'var(--badge-creator)' },
   admin: { icon: 'hammerShield', color: 'var(--badge-admin)' },
   moderator: { icon: 'shield', color: 'var(--badge-mod)' },
   official: { icon: 'checkCircle', color: 'var(--badge-official)' },
   appMod: { icon: 'anarchy', color: 'var(--badge-appmod)' },
+  suspected: { icon: 'alertCircle', color: 'var(--danger)' },
   untrusted: { icon: 'thumbsDown', color: 'var(--badge-untrusted)' }
+}
+
+// The Developer badge is a wrench at a right angle, stroked with a real
+// animated gradient: the two stops cycle orange → red → green out of
+// phase, so a moving gradient band flows along the stroke.
+function DeveloperGradientIcon(props: { size: number }): React.JSX.Element {
+  const gradId = useId()
+  return (
+    <svg
+      className="icon"
+      width={props.size}
+      height={props.size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={`url(#${gradId})`}
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <defs>
+        <linearGradient id={gradId} x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+          <stop offset="0%">
+            <animate attributeName="stop-color" values="#ff9f43;#ff5c5c;#4ad66d;#ff9f43" dur="3.6s" repeatCount="indefinite" />
+          </stop>
+          <stop offset="100%">
+            <animate attributeName="stop-color" values="#4ad66d;#ff9f43;#ff5c5c;#4ad66d" dur="3.6s" repeatCount="indefinite" />
+          </stop>
+        </linearGradient>
+      </defs>
+      {/* wrench at a right angle */}
+      <g transform="rotate(90 12 12)">
+        <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+      </g>
+    </svg>
+  )
 }
 
 // The app-moderator anarchy symbol is stroked with a real animated
@@ -76,13 +114,19 @@ export function Badge(props: { badge: BadgeInfo; size?: number }): React.JSX.Ele
 
   return (
     <span
-      className={`badge badge-${badge.id}`}
+      className={`badge badge-${badge.id}${badge.variant ? ` ${badge.variant}` : ''}`}
       style={{ color: look.color }}
       onMouseEnter={(e) => show(e.currentTarget as HTMLElement)}
       onMouseLeave={() => setTip(null)}
       onMouseDown={() => setTip(null)}
     >
-      {badge.id === 'appMod' ? <AppModGradientIcon size={size} /> : <Icon name={look.icon} size={size} />}
+      {badge.id === 'appMod' ? (
+        <AppModGradientIcon size={size} />
+      ) : badge.id === 'developer' ? (
+        <DeveloperGradientIcon size={size} />
+      ) : (
+        <Icon name={look.icon} size={size} />
+      )}
       {tip && (
         <div className="badge-tip" style={{ left: tip.left, top: tip.top }} data-below={tip.below ? '1' : undefined}>
           <span className="badge-tip-name">{badge.name}</span>

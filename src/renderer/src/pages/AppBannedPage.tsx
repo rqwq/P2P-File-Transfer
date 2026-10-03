@@ -20,23 +20,21 @@ function formatRemaining(ms: number): string {
   return `${s}s`
 }
 
-// A star field where each star fades in at a random spot, twinkles, and
-// fades out — regenerated forever, like a real clear night sky.
+// A star field where each star loops its own twinkle forever at a random
+// spot — a continuous night sky. Stars are mounted ONCE (no periodic
+// regeneration: remounting the whole field made it blink out dark for a
+// moment between generations); `gen` only exists to remount on window
+// restore, because Chromium can park hidden-window CSS animations at
+// opacity 0.
 function StarField(): React.JSX.Element {
   const [gen, setGen] = useState(0)
   useEffect(() => {
-    const t = setInterval(() => setGen((n) => n + 1), 12_000)
-    // Chromium can freeze or mis-time CSS animations while the window is
-    // minimized/hidden, leaving every star parked at opacity 0 after the
-    // restore. Remounting the stars on return to visibility restarts all
-    // animations cleanly.
     const revive = (): void => {
       if (document.visibilityState === 'visible') setGen((n) => n + 1)
     }
     document.addEventListener('visibilitychange', revive)
     window.addEventListener('focus', revive)
     return () => {
-      clearInterval(t)
       document.removeEventListener('visibilitychange', revive)
       window.removeEventListener('focus', revive)
     }
@@ -109,6 +107,10 @@ export function AppBannedPage(): React.JSX.Element {
           Banned by <strong>{ban?.byName || 'App Moderator'}</strong>
           {ban?.byBadges && ban.byBadges.length > 0 && <BadgeRow badges={ban.byBadges} />}
         </div>
+        <div className="appban-identity">
+          <CopyableIdentity label="HWID" value={ban?.targetHwid || ''} bridge={bridge} />
+          <CopyableIdentity label="IP" value={(ban?.targetIps ?? []).join(', ')} bridge={bridge} />
+        </div>
         <div className="appban-foot">This ban cannot be appealed.</div>
         <div className="btn-row" style={{ marginTop: 18 }}>
           <button
@@ -121,6 +123,31 @@ export function AppBannedPage(): React.JSX.Element {
           </button>
         </div>
       </div>
+    </div>
+  )
+}
+
+// One copyable identity row (HWID / IP) — the values the app moderator
+// needs to hardcode this machine into the APP_BANS list in
+// src/shared/constants.ts, so the ban survives a reinstall.
+function CopyableIdentity(props: { label: string; value: string; bridge: ReturnType<typeof useStore.getState>['bridge'] }): React.JSX.Element {
+  const [copied, setCopied] = React.useState(false)
+  const copy = (): void => {
+    if (!props.value) return
+    void props.bridge?.call('sys:copyText', { text: props.value }).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1_600)
+    })
+  }
+  return (
+    <div className="appban-identity-row">
+      <span className="appban-identity-label">{props.label}</span>
+      <code className="appban-identity-value" title={props.value || '—'}>
+        {props.value || '—'}
+      </code>
+      <button className="btn ghost small" disabled={!props.value} onClick={copy}>
+        {copied ? 'Copied ✓' : 'Copy'}
+      </button>
     </div>
   )
 }

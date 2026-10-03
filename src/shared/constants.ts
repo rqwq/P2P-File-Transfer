@@ -86,7 +86,10 @@ export const ROLE_RANK: Record<RoleId, number> = { creator: 4, admin: 3, moderat
 // flag). Bump this whenever wire shapes change incompatibly. This is a
 // cooperative check — a modified client can lie; there is no server to
 // attest builds in a serverless app.
-export const PROTOCOL_VERSION = 2
+// v3: instant joins carry a join reason; new wire messages (suspect,
+// tasks_cleared) and the banned-joiner ban reply — old builds kill the
+// connection on the unknown message types.
+export const PROTOCOL_VERSION = 3
 
 // Extra HWID hashes (64 uppercase hex) allowed to issue app bans and
 // shown with the Official App Moderator hammer — ADDITIONAL to the
@@ -106,13 +109,39 @@ export function isAppModHwid(hwid: string, reservedHwid: string): boolean {
   return hwid === reservedHwid || APP_MOD_HWIDS.includes(hwid)
 }
 
+// Extra developer HWIDs (64 uppercase hex) — ADDITIONAL to the owner,
+// who is ALWAYS the developer. The Developer badge outranks the App
+// Moderator badge.
+export const DEVELOPER_HWIDS: string[] = []
+
+export function isDeveloperHwid(hwid: string, reservedHwid: string): boolean {
+  return hwid === reservedHwid || DEVELOPER_HWIDS.includes(hwid)
+}
+
+// Hardcoded suspicion list (developer-maintained, baked into the build):
+// reasons accumulate and can never be deleted — only `marked: true`
+// turns the badge from red to orange ("past suspicions", all reasons on
+// hover). Runtime suspicions (staff "Suspect…" dialog) are recorded the
+// same way per machine; this list is the authoritative, build-time copy.
+export interface SuspectEntry {
+  hwid: string
+  reasons: string[]
+  marked?: boolean
+}
+export const SUSPECTED: SuspectEntry[] = []
+
 // Build-time app-level blocklist (owner decision, baked into the build).
-// Checked against the local machine's HWID hash at startup — a match
-// boots into the APP BANNED screen and disables auto-update. This is the
-// whole enforcement: the app refuses itself, nothing modifies anyone's
-// files. Peer-delivered bans (app_ban) land in the same screen via the
-// appBans DB table at runtime.
-export const APP_BANS: { hwid: string; reason: string; until: number | null }[] = []
+// Checked against the local machine's HWID hash AND its IPv4 addresses at
+// startup — a match boots into the APP BANNED screen and disables
+// auto-update. This is the whole enforcement: the app refuses itself,
+// nothing modifies anyone's files. Peer-delivered bans (app_ban) land in
+// the same screen via the appBans DB table at runtime — but deleting the
+// app also deletes that table, which is exactly why this hardcoded list
+// exists: an install on the same hardware (or behind the same IP) is
+// banned regardless of any database. The APP BAN dialog and the APP
+// BANNED screen both show the target's HWID and IP so they can be copied
+// into an entry here.
+export const APP_BANS: { hwid: string; ips?: string[]; reason: string; until: number | null }[] = []
 
 // Badge catalog: id, display name and the hover description shown in the
 // tooltip (name on the first line, description below a gray separator).
@@ -121,13 +150,23 @@ export interface BadgeDef {
   description: string
 }
 
-export type BadgeId = 'appMod' | 'official' | 'creator' | 'admin' | 'moderator' | 'untrusted'
+export type BadgeId =
+  | 'developer'
+  | 'appMod'
+  | 'official'
+  | 'creator'
+  | 'admin'
+  | 'moderator'
+  | 'suspected'
+  | 'untrusted'
 
 export const BADGES: Record<BadgeId, BadgeDef> = {
+  developer: { name: 'Developer', description: 'The developer of the app.' },
   appMod: { name: 'App Moderator', description: 'The Official App Moderator.' },
   official: { name: 'Verified', description: 'Official representative of the app.' },
   creator: { name: 'Room Creator', description: 'The creator of this room.' },
   admin: { name: 'Room Administrator', description: 'The administrator of this room.' },
   moderator: { name: 'Room Moderator', description: 'The moderator of this room.' },
+  suspected: { name: 'Suspected', description: 'This user is suspected of something.' },
   untrusted: { name: 'Untrusted', description: 'Caught running a modified or mismatched app build.' }
 }

@@ -56,7 +56,7 @@ export type MainToWorker =
   | MainReply
   | { kind: 'identity'; name: string; hwid: string; maxSpeedBps: number | null }
   | { kind: 'room:create'; name: string; memberCap: number | null; transport: 'dht' | 'vpn'; vpnIp: string | null; id?: number }
-  | { kind: 'room:join'; code: string; id?: number }
+  | { kind: 'room:join'; code: string; reason: string; id?: number }
   | { kind: 'room:leave'; roomId: string }
   | { kind: 'room:updateSettings'; roomId: string; settings: Partial<WireRoomSettings> }
   | { kind: 'room:pushRoster'; roomId: string; members: WireMember[]; settings: WireRoomSettings }
@@ -73,6 +73,9 @@ export type MainToWorker =
   | { kind: 'mod:ban'; roomId: string; entry: WireBanEntry }
   | { kind: 'mod:unban'; roomId: string; targetKey: string }
   | { kind: 'mod:setRole'; roomId: string; targetKey: string; role: 'admin' | 'moderator' | 'member' }
+  | { kind: 'mod:suspect'; roomId: string; targetKey: string; targetHwid: string; reason: string }
+  | { kind: 'mod:markSuspected'; roomId: string; targetKey: string; targetHwid: string }
+  | { kind: 'transfer:historyClear'; roomId: string }
   | {
       kind: 'app:banSend'
       roomId: string
@@ -113,6 +116,10 @@ export type MainToWorker =
   | {
       kind: 'rooms:restore'
       rooms: { roomId: string; code: string; transport: 'dht' | 'vpn'; vpnIp: string | null; pending: boolean }[]
+      // Banned installs restore in LEAVE mode: connect to each group once,
+      // tell them this member is gone (member_left), then close — so a
+      // reinstalled/re-banned machine still disappears from the rosters.
+      leave?: boolean
     }
   | {
       kind: 'keypair:init'
@@ -126,6 +133,7 @@ export type WorkerRequest =
       kind: 'mod:admitJoin'
       roomId: string
       joiner: { key: string; name: string; hwid: string; ip: string; pv: number; bid: string }
+      reason: string
       id: number
     }
   | { kind: 'mod:outbox'; roomId: string; id: number }
@@ -168,6 +176,16 @@ export type WorkerEvent =
   | { kind: 'ban:sync'; roomId: string; entries: WireBanEntry[] }
   | { kind: 'role:changed'; roomId: string; key: string; role: 'admin' | 'moderator' | 'member' }
   | { kind: 'member:left'; roomId: string; key: string }
+  | {
+      kind: 'suspect:received'
+      roomId: string
+      targetKey: string
+      targetHwid: string
+      reason: string | null
+      byName: string
+      marked: boolean
+    }
+  | { kind: 'tasks_cleared'; roomId: string }
   // A join application arrived at a staff member (stored in the
   // application center; the creator decides).
   | { kind: 'app:submitted'; roomId: string; applicant: { key: string; name: string; hwid: string; ip: string; pv: number; bid: string } }

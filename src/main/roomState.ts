@@ -1,6 +1,6 @@
 import type { RoomState, RoomSummary, RoomSettings, MemberView, BadgeInfo, Role } from '../shared/api'
 import type { WireRoomSettings } from '../shared/worker'
-import { BADGES, isAppModHwid, RESERVED_HASH_B64, RESERVED_NAME_B64 } from '../shared/constants'
+import { BADGES, isAppModHwid, isDeveloperHwid, RESERVED_HASH_B64, RESERVED_NAME_B64, SUSPECTED } from '../shared/constants'
 import { roomsDb } from './db/rooms'
 
 // Live room state composition: the roster cache + room settings come from
@@ -13,15 +13,37 @@ import { roomsDb } from './db/rooms'
 const RESERVED_NAME = Buffer.from(RESERVED_NAME_B64, 'base64').toString('utf8')
 const RESERVED_HWID = Buffer.from(RESERVED_HASH_B64, 'base64').toString('utf8')
 
-// Badge order: app-wide badges first (App Moderator, Verified), room
-// roles after, Untrusted last.
+// Badge order: app-wide badges first (Developer, App Moderator, Verified),
+// room roles after, Suspected before Untrusted last.
 export function computeBadges(m: { name: string; role: Role; hwid: string; untrusted: number }): BadgeInfo[] {
   const out: BadgeInfo[] = []
+  if (isDeveloperHwid(m.hwid, RESERVED_HWID)) out.push({ id: 'developer', ...BADGES.developer })
   if (isAppModHwid(m.hwid, RESERVED_HWID)) out.push({ id: 'appMod', ...BADGES.appMod })
   if (m.hwid === RESERVED_HWID || m.name === RESERVED_NAME) out.push({ id: 'official', ...BADGES.official })
   if (m.role === 'creator') out.push({ id: 'creator', ...BADGES.creator })
   if (m.role === 'admin') out.push({ id: 'admin', ...BADGES.admin })
   if (m.role === 'moderator') out.push({ id: 'moderator', ...BADGES.moderator })
+  // Suspected: merge the build-time SUSPECTED list (authoritative, in
+  // src/shared/constants.ts) with this machine's runtime suspicion log.
+  // Suspicious rows are append-only — `marked` turns the badge red →
+  // orange ("past suspicions", all reasons in the hover tooltip).
+  {
+    const code = SUSPECTED.find((s) => s.hwid === m.hwid)
+    const local = roomsDb.suspicionsFor(m.hwid)
+    if (code || local.length > 0) {
+      const reasons: string[] = [...(code?.reasons ?? [])]
+      for (const r of local) if (!reasons.includes(r.reason)) reasons.push(r.reason)
+      const marked = code ? code.marked === true : local.every((r) => r.marked === 1)
+      out.push({
+        id: 'suspected',
+        name: BADGES.suspected.name,
+        description: marked
+          ? `Past suspicions: ${reasons.join('; ')}`
+          : `This user is suspected of ${reasons.join('; ')}.`,
+        variant: marked ? 'marked' : undefined
+      })
+    }
+  }
   if (m.untrusted === 1) out.push({ id: 'untrusted', ...BADGES.untrusted })
   return out
 }

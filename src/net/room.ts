@@ -35,6 +35,9 @@ export class RoomNet {
   private discovery: { refresh: (o: { server?: boolean; client?: boolean }) => Promise<unknown> | void; destroy: () => unknown } | null = null
   private closed = false
   private suspended = false
+  // Leave mode (banned installs on boot): every peer that connects gets a
+  // member_left goodbye, then the room closes itself.
+  private leaving = false
   // Keys dialed via swarm.joinPeer — must be leavePeer'd on teardown or
   // hyperswarm keeps reconnecting to them forever.
   private dialed = new Set<string>()
@@ -175,6 +178,22 @@ export class RoomNet {
     return this.suspended
   }
 
+  // Leave mode: this machine is banned and only came online to say
+  // goodbye. registerPeer sends member_left to everyone who connects
+  // (whichever side dialed), and after the grace window the room closes
+  // itself for good — no further traffic, no presence.
+  startLeaving(): void {
+    if (this.closed || this.leaving) return
+    this.leaving = true
+    setTimeout(() => {
+      try {
+        this.close()
+      } catch {
+        // already closed
+      }
+    }, 12_000)
+  }
+
   setMembers(members: WireMember[]): void {
     this.members.clear()
     for (const m of members) this.members.set(m.key, m)
@@ -184,7 +203,6 @@ export class RoomNet {
 
   attachPeer(socket: SecretStream, remoteKey: Buffer | null): Peer {
     const keyHex = remoteKey ? b4a.toString(remoteKey, 'hex') : ''
-    const banKey = `${this.roomId}:${keyHex}`
     if (this.suspended) {
       // User is "offline": unreachable by design — drop the socket before
       // any protocol exchange can happen.
@@ -195,15 +213,12 @@ export class RoomNet {
       }
       throw new Error('room suspended (offline)')
     }
-    if (keyHex && this.ctx.localBans.has(banKey)) {
-      try {
-        socket.destroy()
-      } catch {
-        // already dead
-      }
-      this.ctx.log('info', `rejected banned peer ${keyHex.slice(0, 8)}`)
-      throw new Error('banned peer')
-    }
+    // NOTE: banned keys are NO LONGER destroyed on attach. Destroying the
+    // socket here meant a banned user could never learn WHY — their join
+    // died silently with "rejected banned peer" on our side and no ban
+    // screen on theirs. The socket is attached and the join flow answers
+    // with the full ban entry (see handleJoinRequest); anything other
+    // than a join attempt from a banned key is cut in onControl.
     const trusted = keyHex !== '' && this.ctx.trusted.has(keyHex)
     const peer = new Peer(socket, this.roomId, remoteKey, trusted)
     if (keyHex) this.registerPeer(peer)
@@ -298,6 +313,12 @@ export class RoomNet {
     const existing = this.peers.get(peer.key)
     if (existing && existing !== peer) existing.close()
     this.peers.set(peer.key, peer)
+    if (this.leaving) {
+      // Leave mode (banned install boot): every peer that connects —
+      // whichever side dialed — is told this member is gone, and the
+      // room closes itself after a grace window.
+      peer.sendControl({ t: 'member_left', roomId: this.roomId, key: this.ctx.myKeyHex })
+    }
     this.onPeerAdded(peer)
     this.ctx.onPeerConnected?.(this.roomId, peer.key)
   }
@@ -390,6 +411,20 @@ export class RoomNet {
   // ---- inbound control routing ----
 
   private onControl(peer: Peer, msg: ControlMessage): void {
+    // Banned keys may only ever attempt a join — which handleJoinRequest
+    // answers with the full ban entry so their app can show the ban
+    // screen. Anything else from a banned key cuts the connection.
+    if (
+      this.ctx.localBans.has(`${this.roomId}:${peer.key}`) &&
+      msg.t !== 'hello' &&
+      msg.t !== 'join_request' &&
+      msg.t !== 'ping' &&
+      msg.t !== 'pong'
+    ) {
+      this.ctx.log('info', `cutting banned peer ${peer.key.slice(0, 8)} (non-join traffic)`)
+      peer.close()
+      return
+    }
     switch (msg.t) {
       case 'join_request': {
         if (this.isCreator) {
@@ -543,11 +578,25 @@ export class RoomNet {
       case 'file_done':
       case 'transfer_cap':
       case 'task_update':
+      case 'tasks_cleared':
       case 'preview_request':
       case 'preview_meta':
       case 'preview_error':
         this.ctx.emitMain('transferWire', { roomId: this.roomId, fromKey: peer.key, msg })
         return
+      case 'suspect': {
+        // Staff suspicion, relayed: rows are append-only per machine; the
+        // badge comes from the rebuilt room state.
+        this.ctx.emitMain('suspect:received', {
+          roomId: this.roomId,
+          targetKey: msg.targetKey,
+          targetHwid: msg.targetHwid,
+          reason: msg.reason ?? null,
+          byName: msg.byName,
+          marked: msg.marked === true
+        })
+        return
+      }
       case 'ban': {
         const entry = msg.entry as WireBanEntry
         if (entry.targetKey === this.ctx.myKeyHex) {
@@ -560,7 +609,11 @@ export class RoomNet {
               expiresAt: entry.expiresAt
             }
           })
-          this.close()
+          // Delayed close: a join-time ban reply is followed by the
+          // join_reject on the same socket — destroying the peer in the
+          // same tick would discard it and the join would die with a
+          // misleading timeout instead of the ban verdict.
+          setTimeout(() => this.close(), 500)
           return
         }
         this.ctx.localBans.add(`${this.roomId}:${entry.targetKey}`)
@@ -651,12 +704,14 @@ export class RoomNet {
           // Self-targeted: leave every group BEFORE the connections go
           // down — the peers connected right now (one of them relayed this
           // ban) are the only chance to tell the groups this member is
-          // gone. After the broadcast, suspend tears everything down and
-          // the banned install stays unreachable.
+          // gone. The suspend is DELAYED: destroying the sockets in the
+          // same tick discards the buffered writes and the leave message
+          // never reaches anyone (the app-banned member then stays in
+          // everyone's roster — exactly what the leave is for).
           for (const room of this.ctx.rooms.values()) {
             const r = room as unknown as RoomNet
             r.broadcastAll({ t: 'member_left', roomId: r.roomId, key: this.ctx.myKeyHex })
-            r.suspend()
+            setTimeout(() => r.suspend(), 500)
           }
         }
         return
@@ -790,7 +845,11 @@ export class RoomNet {
       return
     }
     const res = await this.ctx
-      .callMain<{ allow: boolean; reason: string; ban: { reason: string; adminName: string; expiresAt: number | null } | null }>(
+      .callMain<{
+        allow: boolean
+        reason: string
+        ban: import('../shared/worker').WireBanEntry | null
+      }>(
         'mod:admitJoin',
         {
           roomId: this.roomId,
@@ -801,7 +860,8 @@ export class RoomNet {
             ip: peer.ip ?? '',
             pv: msg.pv,
             bid: msg.bid
-          }
+          },
+          reason: msg.reason ?? ''
         }
       )
       .catch(() => ({ allow: false, reason: 'admission failed', ban: null }))
@@ -830,11 +890,26 @@ export class RoomNet {
         room: this.settings,
         members: [...this.members.values()]
       })
-      if (me) this.ctx.log('info', `${msg.name} joined (admitted)`)
-    } else {
-      peer.sendControl({ t: 'join_reject', reason: res.reason, ban: res.ban })
-      if (res.ban) peer.close()
+      if (me) this.ctx.log('info', `${msg.name} joined (instant)`)
+      return
     }
+    if (res.ban) {
+      // Banned applicant: the full ban entry goes on the wire FIRST —
+      // their app renders it as the blocking ban screen with the reason,
+      // issuer and countdown. The join_reject that follows is the
+      // join-button feedback. The close is delayed so both messages
+      // flush (destroying the socket in the same tick discards them).
+      peer.sendControl({ t: 'ban', roomId: this.roomId, entry: res.ban })
+      peer.sendControl({
+        t: 'join_reject',
+        reason: res.reason,
+        ban: { reason: res.ban.reason, adminName: res.ban.adminName, expiresAt: res.ban.expiresAt }
+      })
+      this.ctx.log('info', `rejected banned applicant ${peer.key.slice(0, 8)}`)
+      setTimeout(() => peer.close(), 1_000)
+      return
+    }
+    peer.sendControl({ t: 'join_reject', reason: res.reason, ban: null })
   }
 
   // ---- membership helpers used by the worker entry ----

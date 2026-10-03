@@ -35,7 +35,7 @@ export interface ApplicationRow {
   applicantKey: string
   name: string
   hwid: string
-  status: 'pending' | 'approved' | 'rejected'
+  status: 'pending' | 'approved' | 'rejected' | 'banned'
   reason: string | null
   decidedByName: string | null
   decidedAt: number | null
@@ -198,6 +198,17 @@ class RoomsDb {
         expiresAt INTEGER,
         PRIMARY KEY (roomId, targetKey)
       );
+      CREATE TABLE IF NOT EXISTS suspicions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        roomId TEXT NOT NULL,
+        targetKey TEXT NOT NULL,
+        targetHwid TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        byName TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        marked INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_suspicions_hwid ON suspicions (targetHwid)
     `)
     // Migration: databases created before the roles rework have no
     // `untrusted` column on members.
@@ -518,6 +529,38 @@ class RoomsDb {
     if (!row) return null
     if (row.until !== null && row.until <= Date.now()) return null
     return row
+  }
+
+  // ---- suspicions (append-only staff log; never deletable, only markable) ----
+
+  addSuspicion(row: {
+    roomId: string
+    targetKey: string
+    targetHwid: string
+    reason: string
+    byName: string
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO suspicions (roomId, targetKey, targetHwid, reason, byName, at)
+         VALUES (@roomId, @targetKey, @targetHwid, @reason, @byName, @at)`
+      )
+      .run({ ...row, at: Date.now() })
+  }
+
+  // Red badge → orange: marks every suspicion row for the hardware, forever.
+  markSuspicionHandled(targetHwid: string): void {
+    this.db.prepare('UPDATE suspicions SET marked = 1 WHERE targetHwid = ?').run(targetHwid)
+  }
+
+  suspicionsFor(hwid: string): { reason: string; byName: string; at: number; marked: number }[] {
+    return (
+      this.db
+        .prepare(
+          'SELECT reason, byName, at, marked FROM suspicions WHERE targetHwid = ? ORDER BY at ASC'
+        )
+        .all(hwid) as { reason: string; byName: string; at: number; marked: number }[]
+    )
   }
 
   // ---- summary view for the renderer ----

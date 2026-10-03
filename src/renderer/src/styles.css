@@ -38,6 +38,9 @@
   --badge-mod: #4fb2ff;
   --badge-official: #35e0e8;
   --badge-appmod: #ffe45c;
+  --badge-developer: #ff9f43;
+  --badge-suspected: #ff5c5c;
+  --badge-suspected-marked: #ff9f43;
   --badge-untrusted: #ff6b7a;
   font-size: 15px;
 }
@@ -1714,13 +1717,13 @@ input::placeholder {
   opacity: 0.95;
 }
 
-/* App-moderator hammer: the stroke itself is an animated SVG gradient
-   (yellow → cyan → light-red, see Badge.tsx); the CSS layers a matching
-   color-cycling drop-shadow glow on top. */
+/* App-moderator anarchy symbol: the stroke itself is an animated SVG
+   gradient (yellow → cyan → light-red, see Badge.tsx); the CSS layers a
+   matching color-cycling drop-shadow glow on top. */
 .badge-appMod .icon {
-  animation: hammer-glow 3s linear infinite;
+  animation: appmod-glow 3s linear infinite;
 }
-@keyframes hammer-glow {
+@keyframes appmod-glow {
   0%,
   100% {
     filter: drop-shadow(0 0 3px rgba(255, 228, 92, 0.6));
@@ -1731,6 +1734,38 @@ input::placeholder {
   66% {
     filter: drop-shadow(0 0 3px rgba(255, 143, 154, 0.6));
   }
+}
+
+/* Developer wrench: same gradient treatment (orange → red → green in
+   Badge.tsx) with a matching glow. */
+.badge-developer .icon {
+  animation: developer-glow 3.6s linear infinite;
+}
+@keyframes developer-glow {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 3px rgba(255, 159, 67, 0.6));
+  }
+  33% {
+    filter: drop-shadow(0 0 3px rgba(255, 92, 92, 0.6));
+  }
+  66% {
+    filter: drop-shadow(0 0 3px rgba(74, 214, 109, 0.6));
+  }
+}
+
+/* Suspected: red "!" while the suspicion is active, orange once marked
+   as handled. The tooltip always carries every recorded reason. */
+.badge-suspected .icon {
+  color: var(--badge-suspected);
+  filter: drop-shadow(0 0 3px rgba(255, 92, 92, 0.5));
+}
+.badge-suspected.marked {
+  color: var(--badge-suspected-marked);
+}
+.badge-suspected.marked .icon {
+  color: var(--badge-suspected-marked);
+  filter: drop-shadow(0 0 3px rgba(255, 159, 67, 0.4));
 }
 
 /* Badge tooltip: a real fixed-position element measured in JS, so it
@@ -1834,9 +1869,17 @@ input::placeholder {
   color: var(--ok);
   background: var(--ok-soft);
 }
+.app-verdict.banned {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
 .app-verdict.rejected {
   color: var(--danger);
   background: var(--danger-soft);
+}
+.app-verdict.pending {
+  color: var(--warn, #ffc46b);
+  background: rgba(255, 196, 107, 0.12);
 }
 
 /* ============================================================
@@ -2054,6 +2097,38 @@ input::placeholder {
 }
 .appban-byline strong {
   color: var(--text);
+}
+
+/* HWID / IP rows on the APP BANNED screen: what the app moderator needs
+   to hardcode this machine into APP_BANS (src/shared/constants.ts). */
+.appban-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  text-align: left;
+}
+.appban-identity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.appban-identity-label {
+  flex: 0 0 34px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--text-faint);
+}
+.appban-identity-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  user-select: text;
 }
 
 .appban-foot {

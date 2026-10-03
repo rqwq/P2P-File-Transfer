@@ -13,6 +13,9 @@ export interface BadgeInfo {
   id: import('./constants').BadgeId
   name: string
   description: string
+  // Optional visual variant (e.g. the Suspected badge's 'marked' state
+  // turns it from red to orange).
+  variant?: string
 }
 
 export interface ChatLimits {
@@ -184,13 +187,14 @@ export interface BanEntryView {
   active: boolean
 }
 
-// One entry of the application center (join applications log). Pending
-// rows await a staff decision; approved/rejected rows are the permanent
-// log with who decided, when and the typed-out rejection reason.
+// One entry of the join log (application center). With instant joins every
+// join is recorded: 'approved' rows carry the applicant's typed join
+// reason; 'banned' rows mark join attempts by banned users (with the ban
+// reason); 'rejected' rows are old-style staff rejections.
 export interface ApplicationView {
   applicantKey: string
   name: string
-  status: 'pending' | 'approved' | 'rejected'
+  status: 'pending' | 'approved' | 'rejected' | 'banned'
   reason: string | null
   decidedBy: string | null
   decidedAt: number | null
@@ -204,6 +208,12 @@ export interface AppBanInfo {
   // Identity badges of the issuing app moderator, shown next to their
   // name on the APP BANNED screen.
   byBadges: BadgeInfo[]
+  // The banned machine's own HWID hash and IPv4 addresses, shown on the
+  // screen so the app moderator can copy them into the hardcoded APP_BANS
+  // list (src/shared/constants.ts) — a reinstall wipes the local ban
+  // database, the hardcoded list does not.
+  targetHwid: string
+  targetIps: string[]
   expiresAt: number | null
 }
 
@@ -257,7 +267,7 @@ export interface CallMap {
     out: CallResult
   }
   'room:list': { in: void; out: RoomSummary[] }
-  'room:join': { in: { code: string }; out: CallResult & { pending: boolean } }
+  'room:join': { in: { code: string; reason: string }; out: CallResult & { pending: boolean } }
   'room:leave': { in: { roomId: string }; out: CallResult }
   'room:state': { in: { roomId: string }; out: RoomState | null }
   'room:updateSettings': { in: { roomId: string; settings: Partial<RoomSettings> }; out: CallResult }
@@ -281,9 +291,24 @@ export interface CallMap {
   'mod:bans': { in: { roomId: string }; out: BanEntryView[] }
   'mod:applications': { in: { roomId: string }; out: ApplicationView[] }
   'mod:decideApplication': { in: { roomId: string; applicantKey: string; approve: boolean; reason: string }; out: CallResult }
+  // A member's HWID hash + last known IP — app-mod only, shown in the
+  // APP BAN dialog so the values can be copied into the hardcoded lists.
+  'mod:memberIdentity': {
+    in: { roomId: string; targetKey: string }
+    out: { hwid: string; ip: string | null }
+  }
+  // Staff: mark a member as suspected (reason required). The member's
+  // HWID is returned so staff can copy it into the hardcoded SUSPECTED
+  // list in src/shared/constants.ts.
+  'mod:suspect': { in: { roomId: string; targetKey: string; reason: string }; out: CallResult & { hwid: string } }
+  // Staff: mark a member's suspicions as handled (red badge → orange).
+  // Suspicions are never deletable.
+  'mod:markSuspected': { in: { roomId: string; targetKey: string }; out: CallResult }
+  // Staff: clear the room's transfer history for everyone (terminal task
+  // rows; active transfers are untouched).
+  'transfer:historyClear': { in: { roomId: string }; out: CallResult }
   // App-level ban: only offered to hardcoded APP_MOD_HWIDS identities.
   'app:ban': { in: { roomId: string; targetKey: string; duration: string; reason: string }; out: CallResult }
-  'room:pendingDismiss': { in: { code: string }; out: CallResult }
   'trust:respond': { in: { key: string; accept: boolean }; out: CallResult }
   'invite:respond': { in: { inviteId: string; accept: boolean }; out: CallResult }
   'sys:pickFiles': { in: void; out: { paths: string[] } | null }

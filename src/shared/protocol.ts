@@ -47,12 +47,14 @@ export const memberWireSchema = z.object({
 
 // One application-center row as it travels mod → creator (sync) and
 // between staff builds. The applicant itself never sees rows, only the
-// resulting join_accept/join_reject.
+// resulting join_accept/join_reject. With instant joins the center is a
+// join log: 'approved' rows carry the join reason, 'banned' rows mark
+// rejected join attempts by banned users.
 export const applicationWireSchema = z.object({
   applicantKey: peerKeySchema,
   name: z.string().min(1).max(64),
   hwid: hwidSchema,
-  status: z.enum(['pending', 'approved', 'rejected']),
+  status: z.enum(['pending', 'approved', 'rejected', 'banned']),
   reason: z.string().max(500).nullable(),
   decidedByName: z.string().max(64).nullable(),
   decidedAt: z.number().nullable(),
@@ -127,7 +129,11 @@ export const controlMessageSchema = z.discriminatedUnion('t', [
     name: z.string().min(1).max(64),
     hwid: hwidSchema,
     pv: z.number().int(),
-    bid: buildIdSchema
+    bid: buildIdSchema,
+    // Why the applicant wants to join — lands in the creator's
+    // application center (the join log). Optional for cross-build
+    // compatibility.
+    reason: z.string().max(500).optional()
   }),
   z.object({
     t: z.literal('join_accept'),
@@ -293,6 +299,24 @@ export const controlMessageSchema = z.discriminatedUnion('t', [
     t: z.literal('app_sync'),
     roomId: z.string().max(128),
     entries: z.array(applicationWireSchema).max(1000)
+  }),
+  // A staff member marked a member as suspected (reason) or marked the
+  // member's suspicions as handled (marked: true, reason null). Rows are
+  // append-only — suspicions are never deleted, only marked.
+  z.object({
+    t: z.literal('suspect'),
+    roomId: z.string().max(128),
+    targetKey: peerKeySchema,
+    targetHwid: hwidSchema,
+    reason: z.string().max(500).nullable(),
+    byName: z.string().max(64),
+    marked: z.boolean()
+  }),
+  // Staff cleared the room's transfer history: every non-participant drops
+  // their remote task rows for the room (active participant tasks stay).
+  z.object({
+    t: z.literal('tasks_cleared'),
+    roomId: z.string().max(128)
   }),
   // Broadcast by any peer that sees a roster member advertising a
   // mismatched protocol version; the room creator enforces it (auto

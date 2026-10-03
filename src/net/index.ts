@@ -277,9 +277,11 @@ function routeWireEvent(kind: string, payload: Record<string, unknown>): void {
   }
 }
 
-// The join-request loop: keeps asking while any staff member might be
-// reachable. Used by fresh joins and by restored pending applications.
-function startJoinCycle(room: RoomNet, code: string): NodeJS.Timeout {
+// The join-request loop: re-sends the request while the creator is
+// reachable but has not answered. Joins are instant (the creator answers
+// allow/reject as soon as the request lands), so this only covers the
+// network-contact window — no staff prompt is involved anymore.
+function startJoinCycle(room: RoomNet, code: string, reason: string): NodeJS.Timeout {
   let joinAnnounced = false
   return setInterval(() => {
     const peer = room.peerOf(room.creatorKey)
@@ -295,7 +297,8 @@ function startJoinCycle(room: RoomNet, code: string): NodeJS.Timeout {
         name: identity.name,
         hwid: identity.hwid,
         pv: PROTOCOL_VERSION,
-        bid: BUILD_ID
+        bid: BUILD_ID,
+        reason
       })
     }
   }, 3_000)
@@ -313,7 +316,8 @@ function teardownJoin(room: RoomNet): void {
 }
 
 function joinRoom(
-  code: string
+  code: string,
+  reason: string
 ): Promise<{ ok: boolean; pending?: boolean; error: string | null; ban: { reason: string; adminName: string; expiresAt: number | null } | null }> {
   const decoded = decodeRoomCode(code)
   if (!decoded) {
@@ -331,12 +335,11 @@ function joinRoom(
   // and the join times out even though the creator admitted you.
   ctx.trusted.add(creatorKey)
   if (ctx.rooms.has(roomId)) {
-    // Already joining (pending application) or already a member.
+    // Already joining, or already a member.
     if (joinTimers.has(roomId)) {
       return Promise.resolve({
         ok: false,
-        pending: true,
-        error: 'Application already submitted — waiting for the room staff.',
+        error: 'Already joining this room — wait for the answer.',
         ban: null
       })
     }
@@ -354,18 +357,14 @@ function joinRoom(
   const waiter = new Promise<{ ok: boolean; pending?: boolean; error: string | null; ban: { reason: string; adminName: string; expiresAt: number | null } | null }>((resolve) => {
     const timer = setTimeout(() => {
       joinWaiters.delete(roomId)
-      // The 45s contact window expired without a decision. Instead of a
-      // dead end, the room becomes a PENDING APPLICATION: it announces as
-      // a server (staff can find us), keeps re-sending join_request
-      // whenever staff appear, and shows as a pending card until the
-      // creator's decision arrives.
-      void room.announce(true)
-      post('room:pending', { roomId, code: code.trim() })
-      ctx.log('info', `join: no staff online — application pending (${roomId.slice(0, 8)})`)
+      // Instant joins: there is no staff decision to wait for. If the
+      // creator never answered within the window, the join failed —
+      // tear the half-open room down and say so.
+      teardownJoin(room)
+      ctx.log('warn', `join: could not reach the room creator (${roomId.slice(0, 8)})`)
       resolve({
         ok: false,
-        pending: true,
-        error: 'Application submitted — it will be reviewed by the room staff.',
+        error: 'Could not reach the room creator — they may be offline.',
         ban: null
       })
     }, JOIN_TIMEOUT_MS)
@@ -373,8 +372,8 @@ function joinRoom(
   })
   void room.announce(false)
   void room.connectTo(creatorKey)
-  joinTimers.set(roomId, startJoinCycle(room, code.trim()))
-  ctx.log('info', `join: looking for the room creator (${creatorKey.slice(0, 8)}) — up to 45s`)
+  joinTimers.set(roomId, startJoinCycle(room, code.trim(), reason))
+  ctx.log('info', `join: looking for the room creator (${creatorKey.slice(0, 8)})`)
   return waiter
 }
 
@@ -440,7 +439,8 @@ function mainDispatch(msg: Envelope): void {
       return
     }
     case 'rooms:restore': {
-      for (const r of (msg.rooms as { roomId: string; code: string; transport: 'dht' | 'vpn'; vpnIp: string | null; pending: boolean }[]) ?? []) {
+      const leave = msg.leave === true
+      for (const r of (msg.rooms as { roomId: string; code: string; transport: 'dht' | 'vpn'; vpnIp: string | null }[]) ?? []) {
         if (ctx.rooms.has(r.roomId)) continue
         const decoded = decodeRoomCode(r.code)
         if (!decoded) continue
@@ -454,9 +454,13 @@ function mainDispatch(msg: Envelope): void {
         })
         room.settings.transport = r.transport
         room.settings.vpnIp = r.vpnIp
+        if (leave) room.startLeaving()
         ctx.rooms.set(r.roomId, room)
         topicToRoom.set(b4a.toString(RoomNet.topicOf(r.code), 'hex'), r.roomId)
-        if (!available) {
+        // Leave mode ignores the availability state on purpose: the whole
+        // point is one last contact with each group. Otherwise suspended
+        // rooms would never deliver the goodbye.
+        if (!leave && !available) {
           room.suspend()
           continue
         }
@@ -470,12 +474,6 @@ function mainDispatch(msg: Envelope): void {
           // pings instead of queueing them behind an untrusted peer.
           ctx.trusted.add(creatorKey)
           void room.connectTo(creatorKey)
-          if (r.pending) {
-            // A pending application from a previous session: resume asking
-            // until staff deliver the decision.
-            joinTimers.set(r.roomId, startJoinCycle(room, r.code))
-            ctx.log('info', `join: resuming pending application (${r.roomId.slice(0, 8)})`)
-          }
         }
       }
       return
@@ -514,7 +512,7 @@ function mainDispatch(msg: Envelope): void {
       return
     }
     case 'room:join': {
-      void joinRoom(String(msg.code ?? '')).then((res) => replyMain(msg.id as number, true, res))
+      void joinRoom(String(msg.code ?? ''), String(msg.reason ?? '')).then((res) => replyMain(msg.id as number, true, res))
       return
     }
     case 'room:leave': {
@@ -522,7 +520,9 @@ function mainDispatch(msg: Envelope): void {
       if (room) {
         // Announce the leave before tearing down: the creator drops us
         // from the authoritative roster, so the member list stops
-        // showing us "forever" after leaving.
+        // showing us "forever" after leaving. The teardown is DELAYED —
+        // destroying the sockets in the same tick discards the buffered
+        // writes and the leave message never reaches anyone.
         room.broadcastAll({ t: 'member_left', roomId: room.roomId, key: ctx.myKeyHex })
         const waiter = joinWaiters.get(room.roomId)
         if (waiter) {
@@ -530,7 +530,7 @@ function mainDispatch(msg: Envelope): void {
           joinWaiters.delete(room.roomId)
           waiter.resolve({ ok: false, error: 'cancelled', ban: null })
         }
-        teardownJoin(room)
+        setTimeout(() => teardownJoin(room), 500)
       }
       return
     }
@@ -636,6 +636,38 @@ function mainDispatch(msg: Envelope): void {
         room.members.set(key, { ...member, role })
         room.broadcast({ t: 'role_change', roomId: room.roomId, key, role })
       }
+      return
+    }
+    case 'mod:suspect': {
+      const room = getRoom(String(msg.roomId ?? ''))
+      if (!room) return
+      room.broadcast({
+        t: 'suspect',
+        roomId: room.roomId,
+        targetKey: String(msg.targetKey ?? ''),
+        targetHwid: String(msg.targetHwid ?? ''),
+        reason: String(msg.reason ?? ''),
+        byName: identity.name,
+        marked: false
+      })
+      return
+    }
+    case 'mod:markSuspected': {
+      const room = getRoom(String(msg.roomId ?? ''))
+      if (!room) return
+      room.broadcast({
+        t: 'suspect',
+        roomId: room.roomId,
+        targetKey: String(msg.targetKey ?? ''),
+        targetHwid: String(msg.targetHwid ?? ''),
+        reason: null,
+        byName: identity.name,
+        marked: true
+      })
+      return
+    }
+    case 'transfer:historyClear': {
+      engine?.clearHistoryFromMain(String(msg.roomId ?? ''))
       return
     }
     case 'app:banSend': {

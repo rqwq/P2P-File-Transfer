@@ -45,40 +45,59 @@ export class Moderation {
     this.refreshRoom = refreshRoom ?? null
   }
 
-  // ---- join admission (creator side; ban check is FIRST, spec 7.3) ----
+  // ---- join admission (creator side) ----
+  //
+  // Joins are INSTANT: anyone with the code gets in, and their typed join
+  // reason is recorded in the application center (the join log). The only
+  // automatic rejections are bans, modified builds and name clashes.
+  // A banned applicant receives the full ban entry on the wire, which
+  // their app renders as the blocking ban screen.
 
   async admitJoin(
     roomId: string,
-    joiner: { key: string; name: string; hwid: string; ip: string; pv: number; bid: string }
-  ): Promise<{ allow: boolean; reason: string; ban: { reason: string; adminName: string; expiresAt: number | null } | null }> {
+    joiner: { key: string; name: string; hwid: string; ip: string; pv: number; bid: string },
+    joinReason: string
+  ): Promise<{ allow: boolean; reason: string; ban: WireBanEntry | null }> {
     const room = roomsDb.getRoom(roomId)
     if (!room || !room.isCreator) {
       return { allow: false, reason: 'you are not the room creator', ban: null }
     }
     // Ban-list check (HWID and/or IP, spec 4.3/7.3) before any roster,
-    // chat, or other room data is exchanged. The stored reason reaches the
-    // applicant instantly with this rejection.
+    // chat, or other room data is exchanged. The full entry goes back on
+    // the wire so the applicant's app shows the ban screen immediately.
     const banned = banStore.checkBanned(roomId, joiner.hwid, joiner.ip)
     if (banned) {
+      // Banned join attempts stay visible in the join log.
+      this.upsertApplication(roomId, joiner, 'banned', `banned: ${banned.reason || 'no reason given'}`)
       return {
         allow: false,
         reason: `you are banned from this room — ${banned.reason || 'no reason given'}`,
-        ban: { reason: banned.reason, adminName: banned.adminName, expiresAt: banned.expiresAt }
+        ban: banned
       }
     }
     // Build check (roles & systems spec): a peer advertising a different
     // wire protocol version is running a modified/patched build — auto
-    // group-ban, flag as untrusted, log it in the application center.
+    // group-ban, flag as untrusted, log it in the join log.
     if (joiner.pv !== PROTOCOL_VERSION) {
       const reason = `modified app build (protocol v${joiner.pv} ≠ v${PROTOCOL_VERSION})`
+      const entry: WireBanEntry = {
+        targetKey: joiner.key,
+        hwid: joiner.hwid,
+        ip: joiner.ip,
+        reason,
+        adminName: this.myName(),
+        adminKey: myPublicKey,
+        expiresAt: null,
+        createdAt: Date.now()
+      }
       this.issueBan(roomId, myPublicKey, this.myName(), joiner.key, 'perm', reason, true, joiner.hwid)
       roomsDb.markUntrusted(roomId, joiner.key, true)
-      this.upsertApplication(roomId, joiner, 'rejected', reason)
+      this.upsertApplication(roomId, joiner, 'banned', reason)
       this.log?.(`auto-banned ${joiner.name} (${joiner.key.slice(0, 8)}) — ${reason} [build ${joiner.bid}]`)
-      return { allow: false, reason: `you are banned from this room — ${reason}`, ban: { reason, adminName: this.myName(), expiresAt: null } }
+      return { allow: false, reason: `you are banned from this room — ${reason}`, ban: entry }
     }
     // A previously rejected application answers instantly with the
-    // typed-out rejection reason — no prompt round-trip.
+    // typed-out rejection reason — no round-trip.
     const app = roomsDb.getApplication(roomId, joiner.key)
     if (app && app.status === 'rejected') {
       const reason = app.reason ?? 'application rejected'
@@ -100,21 +119,17 @@ export class Moderation {
     }
     if (roomsDb.getMember(roomId, joiner.key)) {
       // Already a member (reconnect/rejoin, or an approved application
-      // from while this peer was offline) — no prompt needed.
+      // from while this peer was offline) — straight in, no prompt.
       if (app && app.status === 'pending') this.upsertApplication(roomId, joiner, 'approved', null)
       return { allow: true, reason: '', ban: null }
     }
-    // Record the application (the center + its log), then prompt.
-    if (!app) this.upsertApplication(roomId, joiner, 'pending', null)
-    // Trust-on-first-use confirmation prompt (spec 6) — requires explicit
-    // user action, never auto-accept.
-    const accept = await this.promptTrust({
-      key: joiner.key,
-      name: joiner.name,
-      roomId,
-      kind: 'join'
-    })
-    if (!accept) return { allow: false, reason: 'join request declined', ban: null }
+    // Instant join: record the join reason in the log (the application
+    // center's whole purpose) and trust the member — with no Admit
+    // prompt there is no other point where the creator side learns to
+    // trust the key on reconnects.
+    this.upsertApplication(roomId, joiner, 'approved', joinReason.trim() || null, 'instant join')
+    roomsDb.setTrusted(joiner.key, joiner.name)
+    this.log?.(`${joiner.name} (${joiner.key.slice(0, 8)}) joined — ${joinReason.trim() || 'no reason given'}`)
     return { allow: true, reason: '', ban: null }
   }
 
@@ -125,7 +140,7 @@ export class Moderation {
   private upsertApplication(
     roomId: string,
     applicant: { key: string; name: string; hwid: string; ip: string; pv: number; bid: string },
-    status: 'pending' | 'approved' | 'rejected',
+    status: 'pending' | 'approved' | 'rejected' | 'banned',
     reason: string | null,
     decidedBy?: string
   ): void {
@@ -207,7 +222,7 @@ export class Moderation {
       applicantKey: string
       name: string
       hwid: string
-      status: 'pending' | 'approved' | 'rejected'
+      status: 'pending' | 'approved' | 'rejected' | 'banned'
       reason: string | null
       decidedByName: string | null
       decidedAt: number | null

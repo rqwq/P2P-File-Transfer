@@ -118,6 +118,7 @@ export class TransferEngine {
   private dirtyRooms = new Set<string>()
   private flushTimer: NodeJS.Timeout | null = null
   private lastBroadcast = new Map<string, number>()
+  private trailingTimers = new Map<string, NodeJS.Timeout>()
 
   constructor(ctx: NetContext) {
     this.ctx = ctx
@@ -510,6 +511,15 @@ export class TransferEngine {
           state: msg.state,
           updatedAt: Date.now()
         })
+        this.markDirty(msg.roomId)
+        return
+      }
+      case 'tasks_cleared': {
+        // Staff cleared the room's transfer history — drop the
+        // non-participant rows we mirror for that room.
+        for (const id of [...this.remoteTasks.keys()]) {
+          if (id.startsWith(`${msg.roomId}:`)) this.remoteTasks.delete(id)
+        }
         this.markDirty(msg.roomId)
         return
       }
@@ -930,28 +940,63 @@ export class TransferEngine {
     // aggregates to every connected peer.
     const now = Date.now()
     const last = this.lastBroadcast.get(roomId) ?? 0
-    if (now - last >= 1_000) {
-      this.lastBroadcast.set(roomId, now)
-      const room = this.roomOf(roomId)
-      for (const task of tasks) {
-        if (!task.participant) continue
-        const local = this.tasks.get(task.taskId)
-        if (!local) continue
-        const senderKey = local.kind === 'send' ? this.ctx.myKeyHex : local.senderKey
-        const receiverKey = local.kind === 'send' ? local.receiverKey : this.ctx.myKeyHex
-        room?.broadcast({
-          t: 'task_update',
-          taskId: local.taskId,
+    if (now - last < 1_000) {
+      // Throttled — SCHEDULE a trailing flush instead of dropping the
+      // update. A terminal state (cancelled/failed/completed) landing
+      // inside the throttle window used to be dropped silently, and
+      // nothing ever re-marked the task dirty again — so onlookers never
+      // saw a transfer finish or die, it just froze at its last state.
+      if (!this.trailingTimers.has(roomId)) {
+        this.trailingTimers.set(
           roomId,
-          senderKey,
-          receiverKey,
-          total: local.totalSize,
-          done: local.doneBytes,
-          fileCount: local.files.length,
-          state: local.state
-        })
+          setTimeout(() => {
+            this.trailingTimers.delete(roomId)
+            this.flush(roomId)
+          }, 1_000 - (now - last))
+        )
+      }
+      return
+    }
+    this.lastBroadcast.set(roomId, now)
+    const room = this.roomOf(roomId)
+    for (const task of tasks) {
+      if (!task.participant) continue
+      const local = this.tasks.get(task.taskId)
+      if (!local) continue
+      const senderKey = local.kind === 'send' ? this.ctx.myKeyHex : local.senderKey
+      const receiverKey = local.kind === 'send' ? local.receiverKey : this.ctx.myKeyHex
+      room?.broadcast({
+        t: 'task_update',
+        taskId: local.taskId,
+        roomId,
+        senderKey,
+        receiverKey,
+        total: local.totalSize,
+        done: local.doneBytes,
+        fileCount: local.files.length,
+        state: local.state
+      })
+    }
+  }
+
+  // Staff cleared the room's transfer history: terminal local rows and
+  // every non-participant remote row for the room go; active transfers
+  // are untouched. Everyone else drops their remote rows via the
+  // tasks_cleared broadcast.
+  clearHistoryFromMain(roomId: string): void {
+    for (const [id, task] of this.tasks) {
+      if (
+        task.roomId === roomId &&
+        (task.state === 'completed' || task.state === 'failed' || task.state === 'cancelled')
+      ) {
+        this.tasks.delete(id)
       }
     }
+    for (const id of [...this.remoteTasks.keys()]) {
+      if (id.startsWith(`${roomId}:`)) this.remoteTasks.delete(id)
+    }
+    this.markDirty(roomId)
+    this.roomOf(roomId)?.broadcast({ t: 'tasks_cleared', roomId })
   }
 
   snapshot(roomId: string): TaskView[] {

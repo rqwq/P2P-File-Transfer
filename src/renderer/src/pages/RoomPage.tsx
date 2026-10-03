@@ -31,6 +31,7 @@ export function RoomPage(): React.JSX.Element {
   const [showApps, setShowApps] = useState(false)
   const [showBans, setShowBans] = useState(false)
   const [appBanTarget, setAppBanTarget] = useState<string | null>(null)
+  const [suspectTarget, setSuspectTarget] = useState<string | null>(null)
 
   const state = currentRoomId ? roomStates[currentRoomId] : null
   const roomId = currentRoomId ?? ''
@@ -203,7 +204,12 @@ export function RoomPage(): React.JSX.Element {
               New transfer
             </button>
           </div>
-          <TransfersPane roomId={roomId} tasks={tasks} onStartSend={() => setSendFor(null)} />
+          <TransfersPane
+            roomId={roomId}
+            tasks={tasks}
+            onStartSend={() => setSendFor(null)}
+            canClearHistory={isStaff}
+          />
         </section>
 
         {/* ------- side panel: chat ------- */}
@@ -269,6 +275,36 @@ export function RoomPage(): React.JSX.Element {
             })()}
           {isStaff && (
             <>
+              {(() => {
+                const member = state.members.find((m) => m.key === ctx.key)
+                const suspected = member?.badges.some((b) => b.id === 'suspected')
+                return (
+                  <>
+                    <button
+                      className="ctx-item"
+                      onClick={() => {
+                        setSuspectTarget(ctx.key)
+                        setCtx(null)
+                      }}
+                    >
+                      <Icon name="alertCircle" size={13} />
+                      Suspect…
+                    </button>
+                    {suspected && (
+                      <button
+                        className="ctx-item"
+                        onClick={() => {
+                          void bridge.call('mod:markSuspected', { roomId, targetKey: ctx.key })
+                          setCtx(null)
+                        }}
+                      >
+                        <Icon name="check" size={13} />
+                        Mark suspicions handled
+                      </button>
+                    )}
+                  </>
+                )
+              })()}
               <button
                 className="ctx-item danger"
                 onClick={() => {
@@ -310,6 +346,9 @@ export function RoomPage(): React.JSX.Element {
       {appBanTarget && (
         <AppBanModal roomId={roomId} targetKey={appBanTarget} onClose={() => setAppBanTarget(null)} />
       )}
+      {suspectTarget && (
+        <SuspectModal roomId={roomId} targetKey={suspectTarget} onClose={() => setSuspectTarget(null)} />
+      )}
       {showApps && <ApplicationCenterModal roomId={roomId} onClose={() => setShowApps(false)} />}
       {showBans && <BanManagerModal roomId={roomId} onClose={() => setShowBans(false)} />}
       {showRoomSettings && <RoomSettingsModal roomId={roomId} onClose={() => setShowRoomSettings(false)} />}
@@ -334,6 +373,7 @@ function TransfersPane(props: {
   roomId: string
   tasks: import('../../../shared/api').TaskView[]
   onStartSend: () => void
+  canClearHistory: boolean
 }): React.JSX.Element {
   const bridge = useStore((s) => s.bridge)
   const online = useStore((s) => s.online)
@@ -457,6 +497,20 @@ function TransfersPane(props: {
 
   return (
     <div className="main-scroll">
+      {props.canClearHistory && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+          <button
+            className="btn ghost small"
+            title="Remove finished, failed and cancelled transfer rows for everyone in the room. Active transfers are untouched."
+            onClick={() => {
+              void bridge?.call('transfer:historyClear', { roomId: props.roomId })
+            }}
+          >
+            <Icon name="trash" size={12} />
+            Clear history
+          </button>
+        </div>
+      )}
       {live.map((t) => card(t, false))}
       {finished.length > 0 && <div className="side-section">Recent — {Math.min(3, finished.length)}</div>}
       {finished.slice(0, 3).map((t) => card(t, true))}
@@ -535,41 +589,21 @@ function BanMemberModal(props: { roomId: string; targetKey: string; onClose: () 
 function ApplicationCenterModal(props: { roomId: string; onClose: () => void }): React.JSX.Element {
   const bridge = useStore((s) => s.bridge)
   const [apps, setApps] = useState<ApplicationView[]>([])
-  const [rejectFor, setRejectFor] = useState<string | null>(null)
-  const [reason, setReason] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
 
   const load = (): void => {
     void bridge?.call('mod:applications', { roomId: props.roomId }).then(setApps)
   }
   useEffect(load, [props.roomId])
 
-  const decide = (applicantKey: string, approve: boolean): void => {
-    if (!bridge || busy) return
-    setBusy(true)
-    void bridge
-      .call('mod:decideApplication', { roomId: props.roomId, applicantKey, approve, reason: approve ? '' : reason })
-      .then((res) => {
-        if (!res.ok) {
-          setError(res.error)
-          setBusy(false)
-          return
-        }
-        setRejectFor(null)
-        setReason('')
-        setError(null)
-        load()
-      })
-      .finally(() => setBusy(false))
-  }
-
-  const pending = apps.filter((a) => a.status === 'pending')
-  const decided = apps.filter((a) => a.status !== 'pending')
+  const chip = (status: ApplicationView['status']): React.JSX.Element => (
+    <span className={`app-verdict ${status}`}>
+      {status === 'approved' ? 'joined' : status === 'banned' ? 'banned' : status === 'rejected' ? 'rejected' : 'pending'}
+    </span>
+  )
 
   return (
     <Modal
-      title="Application center"
+      title="Join log"
       icon="mail"
       onClose={props.onClose}
       footer={
@@ -579,71 +613,28 @@ function ApplicationCenterModal(props: { roomId: string; onClose: () => void }):
       }
     >
       <div className="field">
-        <span className="field-label">Pending applications — {pending.length}</span>
-        {pending.length === 0 ? (
+        <span className="field-label">
+          Joins — {apps.length} · every join is instant; its typed reason lands here for the staff
+        </span>
+        {apps.length === 0 ? (
           <p style={{ fontSize: 12, color: 'var(--text-faint)', margin: 0 }}>
-            No pending applications. New requests appear here (and as an admit prompt) as they arrive.
+            Nobody has joined yet. When someone joins with the room code, their name, reason and time
+            appear here — banned join attempts are recorded too.
           </p>
         ) : (
           <div className="app-list">
-            {pending.map((a) => (
-              <div key={a.applicantKey} className="app-row">
-                <div className="app-row-body">
-                  <div className="app-row-name">{a.name}</div>
-                  <div className="app-row-meta">
-                    {shortKey(a.applicantKey)} · {new Date(a.createdAt).toLocaleString()}
-                  </div>
-                  {rejectFor === a.applicantKey && (
-                    <input
-                      autoFocus
-                      value={reason}
-                      maxLength={500}
-                      placeholder="Type out the rejection reason…"
-                      onChange={(e) => setReason(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && decide(a.applicantKey, false)}
-                    />
-                  )}
-                </div>
-                <div className="app-row-actions">
-                  <button className="btn small" disabled={busy} onClick={() => decide(a.applicantKey, true)}>
-                    <Icon name="check" size={12} />
-                    Accept
-                  </button>
-                  {rejectFor === a.applicantKey ? (
-                    <button className="btn danger small" disabled={busy || reason.trim().length === 0} onClick={() => decide(a.applicantKey, false)}>
-                      <Icon name="x" size={12} />
-                      Send rejection
-                    </button>
-                  ) : (
-                    <button className="btn danger small" onClick={() => setRejectFor(a.applicantKey)}>
-                      <Icon name="x" size={12} />
-                      Reject…
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-      <div className="field">
-        <span className="field-label">Decision log</span>
-        {decided.length === 0 ? (
-          <p style={{ fontSize: 12, color: 'var(--text-faint)', margin: 0 }}>No decisions yet.</p>
-        ) : (
-          <div className="app-list">
-            {decided.map((a) => (
-              <div key={a.applicantKey} className={`app-row${a.status === 'approved' ? ' ok' : ' no'}`}>
+            {apps.map((a) => (
+              <div
+                key={a.applicantKey}
+                className={`app-row${a.status === 'approved' ? ' ok' : ' no'}`}
+              >
                 <div className="app-row-body">
                   <div className="app-row-name">
-                    {a.name}{' '}
-                    <span className={`app-verdict ${a.status}`}>
-                      {a.status === 'approved' ? 'approved' : 'rejected'}
-                    </span>
+                    {a.name} {chip(a.status)}
                   </div>
                   <div className="app-row-meta">
-                    by {a.decidedBy ?? 'staff'} · {new Date(a.decidedAt ?? a.createdAt).toLocaleString()}
-                    {a.status === 'rejected' && a.reason ? ` — “${a.reason}”` : ''}
+                    {new Date(a.decidedAt ?? a.createdAt).toLocaleString()}
+                    {a.reason ? ` — “${a.reason}”` : ''}
                   </div>
                 </div>
               </div>
@@ -651,7 +642,6 @@ function ApplicationCenterModal(props: { roomId: string; onClose: () => void }):
           </div>
         )}
       </div>
-      <div className="error-text">{error ?? ''}</div>
     </Modal>
   )
 }
@@ -732,6 +722,20 @@ function AppBanModal(props: { roomId: string; targetKey: string; onClose: () => 
   const [reason, setReason] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [identity, setIdentity] = useState<{ hwid: string; ip: string | null } | null>(null)
+  const [copied, setCopied] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!bridge) return
+    void bridge.call('mod:memberIdentity', { roomId: props.roomId, targetKey: props.targetKey }).then(setIdentity)
+  }, [bridge, props.roomId, props.targetKey])
+
+  const copy = (what: string, text: string): void => {
+    void bridge?.call('sys:copyText', { text }).then(() => {
+      setCopied(what)
+      setTimeout(() => setCopied(null), 1_600)
+    })
+  }
 
   const issue = (): void => {
     if (!bridge || busy) return
@@ -774,10 +778,139 @@ function AppBanModal(props: { roomId: string; targetKey: string; onClose: () => 
         <span className="field-label">Reason (shown on their APP BANNED screen)</span>
         <input value={reason} maxLength={500} placeholder="Required" onChange={(e) => setReason(e.target.value)} />
       </div>
+      {identity && (
+        <div className="field">
+          <span className="field-label">
+            Target identity — copy into the hardcoded APP_BANS list (src/shared/constants.ts) to make the ban survive a reinstall
+          </span>
+          <div className="appban-identity">
+            <div className="appban-identity-row">
+              <span className="appban-identity-label">HWID</span>
+              <code className="appban-identity-value" title={identity.hwid || '—'}>
+                {identity.hwid || '—'}
+              </code>
+              <button
+                className="btn ghost small"
+                disabled={!identity.hwid}
+                onClick={() => copy('hwid', identity.hwid)}
+              >
+                {copied === 'hwid' ? 'Copied ✓' : 'Copy'}
+              </button>
+            </div>
+            <div className="appban-identity-row">
+              <span className="appban-identity-label">IP</span>
+              <code className="appban-identity-value" title={identity.ip || '—'}>
+                {identity.ip || '—'}
+              </code>
+              <button
+                className="btn ghost small"
+                disabled={!identity.ip}
+                onClick={() => copy('ip', identity.ip ?? '')}
+              >
+                {copied === 'ip' ? 'Copied ✓' : 'Copy'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="error-text">{error ?? ''}</div>
       <p style={{ fontSize: 12, color: 'var(--text-faint)', margin: 0 }}>
         Their app blocks itself with the ban screen, reason and countdown, and stops updating. No files on
         their machine are touched.
+      </p>
+    </Modal>
+  )
+}
+
+// Staff "Suspect…" dialog: typed reason + the target's HWID (copy it into
+// the hardcoded SUSPECTED list in src/shared/constants.ts). Suspicion rows
+// are append-only — they can only ever be marked as handled, never deleted.
+function SuspectModal(props: { roomId: string; targetKey: string; onClose: () => void }): React.JSX.Element {
+  const bridge = useStore((s) => s.bridge)
+  const [reason, setReason] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [hwid, setHwid] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    if (!bridge) return
+    void bridge
+      .call('mod:memberIdentity', { roomId: props.roomId, targetKey: props.targetKey })
+      .then((res) => setHwid(res.hwid))
+  }, [bridge, props.roomId, props.targetKey])
+
+  const submit = (): void => {
+    if (!bridge || busy) return
+    setBusy(true)
+    void bridge
+      .call('mod:suspect', { roomId: props.roomId, targetKey: props.targetKey, reason })
+      .then((res) => {
+        if (!res.ok) {
+          setError(res.error)
+          setBusy(false)
+          return
+        }
+        useStore
+          .getState()
+          .toast('Suspected', 'The member now carries the red "!" badge. It can only be marked as handled, never removed.', 'info')
+        props.onClose()
+      })
+      .finally(() => setBusy(false))
+  }
+
+  return (
+    <Modal
+      title={`Suspect ${shortKey(props.targetKey)}`}
+      icon="alertCircle"
+      onClose={props.onClose}
+      footer={
+        <>
+          <button className="btn" onClick={props.onClose}>
+            Cancel
+          </button>
+          <button className="btn danger" disabled={busy || reason.trim().length === 0} onClick={submit}>
+            <Icon name="alertCircle" size={13} />
+            {busy ? 'Marking…' : 'Mark as suspected'}
+          </button>
+        </>
+      }
+    >
+      <div className="field">
+        <span className="field-label">Suspected of… (shown on the badge hover, for every staff member)</span>
+        <input
+          value={reason}
+          maxLength={500}
+          placeholder="Required — e.g. spreading a modified build"
+          onChange={(e) => setReason(e.target.value)}
+        />
+      </div>
+      {hwid && (
+        <div className="field">
+          <span className="field-label">
+            Target HWID — copy it into the hardcoded SUSPECTED list (src/shared/constants.ts) so the badge ships with the build
+          </span>
+          <div className="appban-identity-row">
+            <code className="appban-identity-value" title={hwid}>
+              {hwid}
+            </code>
+            <button
+              className="btn ghost small"
+              onClick={() => {
+                void bridge?.call('sys:copyText', { text: hwid }).then(() => {
+                  setCopied(true)
+                  setTimeout(() => setCopied(false), 1_600)
+                })
+              }}
+            >
+              {copied ? 'Copied ✓' : 'Copy'}
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="error-text">{error ?? ''}</div>
+      <p style={{ fontSize: 12, color: 'var(--text-faint)', margin: 0 }}>
+        A suspicion is permanent history: the red "!" badge can only turn orange ("handled"), never disappear.
       </p>
     </Modal>
   )

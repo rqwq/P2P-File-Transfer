@@ -193,32 +193,27 @@ export function registerIpc(ctx: IpcContext): void {
       return ok()
     },
     'room:list': () => roomsDb.summaries(roomStateCache.onlineSets(roomsDb.listRooms().map((r) => r.roomId))),
-    'room:join': async (p: { code: string }): Promise<CallResult & { pending: boolean }> => {
-      // The worker's join flow waits up to 45s (creator admission prompt
-      // included) and replies with a precise reason; the request window
-      // must be longer so that answer — not a generic timeout — surfaces.
+    'room:join': async (p: { code: string; reason: string }): Promise<CallResult & { pending: boolean }> => {
+      // Instant joins: the worker's join flow completes as soon as the
+      // creator answers (no staff prompt); the request window must simply
+      // be longer than the network round-trip so that answer — not a
+      // generic timeout — surfaces.
       const reply = await ctx.net.request<{
         ok: boolean
         error: string | null
         pending?: boolean
         ban: { reason: string; adminName: string; expiresAt: number | null } | null
-      }>({ kind: 'room:join', code: p.code.trim() }, 60_000)
-      const pending = reply.pending === true
-      if (!reply.ok && !pending) {
+      }>({ kind: 'room:join', code: p.code.trim(), reason: p.reason }, 60_000)
+      if (!reply.ok) {
         if (reply.ban) {
+          // The blocking ban screen arrives as its own 'banned' event (the
+          // worker also sends the full ban entry); this toast is the
+          // join-button feedback.
           notifier.push('You are banned', reply.ban.reason || 'No reason given', 'ban')
         }
-        // A rejection lands on the pending card so the typed-out reason
-        // stays visible in the room list.
         roomsDb.markPendingRejected(p.code.trim(), reply.error ?? 'application rejected')
         ctx.pushRooms()
         return { ok: false, error: reply.error, pending: false }
-      }
-      if (pending) {
-        // Application submitted — the room card shows as pending and the
-        // worker keeps retrying until staff decide.
-        ctx.pushRooms()
-        return { ok: false, error: reply.error ?? 'Application submitted — waiting for the room staff.', pending: true }
       }
       ctx.pushRooms()
       return { ok: true, error: null, pending: false }
@@ -405,12 +400,82 @@ export function registerIpc(ctx: IpcContext): void {
       notifier.push('App ban issued', `${target.name} is banned from the app${parsed.expiresAt === null ? ' permanently' : ''}.`, 'ban')
       return ok()
     },
-    'room:pendingDismiss': (p: { code: string }): CallResult => {
-      const pending = roomsDb.listPendingRooms().find((pr) => pr.code === p.code)
-      if (!pending) return ok('not found')
-      roomsDb.deletePendingRoom(p.code)
-      ctx.net.send({ kind: 'room:leave', roomId: pending.roomId })
-      ctx.pushRooms()
+    // Staff (and app mods): a member's HWID hash and last known IP, shown
+    // in the APP BAN and Suspect dialogs so the values can be copied into
+    // the hardcoded lists in src/shared/constants.ts.
+    'mod:memberIdentity': (p: { roomId: string; targetKey: string }): { hwid: string; ip: string | null } => {
+      const room = roomsDb.getRoom(p.roomId)
+      if (!room) return { hwid: '', ip: null }
+      const me = roomsDb.getMember(p.roomId, myPublicKey)
+      const staff = room.isCreator || me?.role === 'admin' || me?.role === 'moderator'
+      if (!staff && !isAppModHwid(ctx.hwidHash(), RESERVED_HWID)) return { hwid: '', ip: null }
+      const member = roomsDb.getMember(p.roomId, p.targetKey)
+      return {
+        hwid: member?.hwid ?? '',
+        ip: roomStateCache.peerIp(p.roomId, p.targetKey)
+      }
+    },
+    // Staff: mark a member as suspected with a typed reason. The member's
+    // HWID comes back in the reply so staff can also add it to the
+    // hardcoded SUSPECTED list in src/shared/constants.ts.
+    'mod:suspect': (p: { roomId: string; targetKey: string; reason: string }): CallResult & { hwid: string } => {
+      const room = roomsDb.getRoom(p.roomId)
+      if (!room) return { ...ok('not in this room'), hwid: '' }
+      const me = roomsDb.getMember(p.roomId, myPublicKey)
+      const staff = room.isCreator || me?.role === 'admin' || me?.role === 'moderator'
+      if (!staff) return { ...ok('You do not have permission.'), hwid: '' }
+      const target = roomsDb.getMember(p.roomId, p.targetKey)
+      if (!target) return { ...ok('member not found'), hwid: '' }
+      if (target.key === myPublicKey) return { ...ok('You cannot suspect yourself.'), hwid: '' }
+      const reason = p.reason.trim()
+      if (reason.length === 0) return { ...ok('Type out the suspicion.'), hwid: target.hwid }
+      const byName = me?.name ?? settings.get().displayName
+      roomsDb.addSuspicion({
+        roomId: p.roomId,
+        targetKey: p.targetKey,
+        targetHwid: target.hwid,
+        reason,
+        byName
+      })
+      ctx.net.send({
+        kind: 'mod:suspect',
+        roomId: p.roomId,
+        targetKey: p.targetKey,
+        targetHwid: target.hwid,
+        reason
+      })
+      ctx.pushRoomState(p.roomId)
+      return { ...ok(), hwid: target.hwid }
+    },
+    // Staff: mark a member's suspicions as handled — red badge turns
+    // orange. Suspicion rows are never deletable.
+    'mod:markSuspected': (p: { roomId: string; targetKey: string }): CallResult => {
+      const room = roomsDb.getRoom(p.roomId)
+      if (!room) return ok('not in this room')
+      const me = roomsDb.getMember(p.roomId, myPublicKey)
+      const staff = room.isCreator || me?.role === 'admin' || me?.role === 'moderator'
+      if (!staff) return ok('You do not have permission.')
+      const target = roomsDb.getMember(p.roomId, p.targetKey)
+      if (!target) return ok('member not found')
+      roomsDb.markSuspicionHandled(target.hwid)
+      ctx.net.send({
+        kind: 'mod:markSuspected',
+        roomId: p.roomId,
+        targetKey: p.targetKey,
+        targetHwid: target.hwid
+      })
+      ctx.pushRoomState(p.roomId)
+      return ok()
+    },
+    // Staff: clear the room's transfer history — terminal task rows for
+    // everyone; active transfers are untouched.
+    'transfer:historyClear': (p: { roomId: string }): CallResult => {
+      const room = roomsDb.getRoom(p.roomId)
+      if (!room) return ok('not in this room')
+      const me = roomsDb.getMember(p.roomId, myPublicKey)
+      const staff = room.isCreator || me?.role === 'admin' || me?.role === 'moderator'
+      if (!staff) return ok('You do not have permission.')
+      ctx.net.send({ kind: 'transfer:historyClear', roomId: p.roomId })
       return ok()
     },
     'mod:bans': (p: { roomId: string }): BanEntryView[] => {

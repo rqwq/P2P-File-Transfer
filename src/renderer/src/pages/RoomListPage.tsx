@@ -18,14 +18,17 @@ export function RoomListPage(): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   const [joinElapsed, setJoinElapsed] = useState(0)
   const [creating, setCreating] = useState(false)
+  // null = closed · string = code awaiting its typed join reason
+  const [reasonFor, setReasonFor] = useState<string | null>(null)
+  const [joinReason, setJoinReason] = useState('')
 
   useEffect(() => {
     void refreshRooms()
   }, [refreshRooms])
 
-  // Live "still working" feedback during a join — it can legitimately take
-  // up to 45s (creator admission), and a silently disabled button reads
-  // as stuck.
+  // Live "still working" feedback during a join — reaching the creator over
+  // the DHT can take a few seconds, and a silently disabled button reads as
+  // stuck.
   useEffect(() => {
     if (!busy) {
       setJoinElapsed(0)
@@ -35,7 +38,7 @@ export function RoomListPage(): React.JSX.Element {
     return () => clearInterval(t)
   }, [busy])
 
-  const join = (code: string, inviteId?: string): void => {
+  const join = (code: string, reason: string, inviteId?: string): void => {
     if (!bridge || busy) return
     if (!useStore.getState().online) {
       setJoinError('You are offline — go online first (bottom-left toggle).')
@@ -44,17 +47,8 @@ export function RoomListPage(): React.JSX.Element {
     setBusy(true)
     setJoinError(null)
     void bridge
-      .call('room:join', { code })
+      .call('room:join', { code, reason })
       .then(async (res) => {
-        if (res.pending) {
-          // Application submitted: the room shows as a pending card and
-          // the worker keeps retrying until staff decide.
-          setJoinCode('')
-          if (inviteId) respondInvite(inviteId, true)
-          useStore.getState().toast('Application submitted', 'It will be reviewed by the room staff. The room appears as pending in your list.', 'info')
-          await refreshRooms()
-          return
-        }
         if (!res.ok) {
           setJoinError(res.error)
           return
@@ -68,6 +62,20 @@ export function RoomListPage(): React.JSX.Element {
       })
       .finally(() => setBusy(false))
   }
+
+  // Opens the join-reason dialog for a code (typed by the user or accepted
+  // from an invite); confirming performs the join.
+  const askReason = (code: string, inviteId?: string): void => {
+    if (busy) return
+    if (!useStore.getState().online) {
+      setJoinError('You are offline — go online first (bottom-left toggle).')
+      return
+    }
+    setJoinReason('')
+    setReasonFor(code)
+    reasonInviteId.current = inviteId ?? null
+  }
+  const reasonInviteId = React.useRef<string | null>(null)
 
   const online = useStore((s) => s.online)
   const setOnline = useStore((s) => s.setOnline)
@@ -104,7 +112,7 @@ export function RoomListPage(): React.JSX.Element {
                   <div className="invite-title">Invitation: {inv.roomName}</div>
                   <div className="invite-from">from {inv.from}</div>
                 </div>
-                <button className="btn small" onClick={() => join(inv.code, inv.id)}>
+                <button className="btn small" onClick={() => askReason(inv.code, inv.id)}>
                   <Icon name="check" size={13} />
                   Accept
                 </button>
@@ -121,9 +129,13 @@ export function RoomListPage(): React.JSX.Element {
             value={joinCode}
             placeholder="Paste a room code…"
             onChange={(e) => setJoinCode(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && join(joinCode)}
+            onKeyDown={(e) => e.key === 'Enter' && joinCode.trim().length > 0 && askReason(joinCode)}
           />
-          <button className="btn primary" disabled={busy || joinCode.trim().length === 0} onClick={() => join(joinCode)}>
+          <button
+            className="btn primary"
+            disabled={busy || joinCode.trim().length === 0}
+            onClick={() => askReason(joinCode)}
+          >
             <Icon name="arrowRight" size={14} />
             Join room
           </button>
@@ -137,10 +149,10 @@ export function RoomListPage(): React.JSX.Element {
           <div className="join-progress">
             <span className="spinner small" />
             <span>
-              Reaching the room creator… {joinElapsed}s / 45s
+              Reaching the room creator… {joinElapsed}s
               <br />
               <span className="join-progress-sub">
-                They must be online and click <strong>Admit to room</strong> when your request arrives.
+                You join instantly once the creator is reached — no one has to click anything.
               </span>
             </span>
           </div>
@@ -151,84 +163,99 @@ export function RoomListPage(): React.JSX.Element {
             <div className="big">⇄</div>
             No rooms yet. Create one and share its code, or paste a code from a friend.
             <br />
-            The room creator must be online to admit new members.
+            The room creator must be online for you to join.
           </div>
         ) : (
           <div className="room-grid">
             {rooms.map((room) => (
-              <div
-                key={room.roomId}
-                className={`room-card${room.joinState !== 'member' ? ` app-${room.joinState}` : ''}`}
-                onClick={() => {
-                  if (room.joinState === 'member') void selectRoom(room.roomId)
-                }}
-              >
+              <div key={room.roomId} className="room-card" onClick={() => void selectRoom(room.roomId)}>
                 <div className="room-card-name">
                   <Icon name="hash" size={14} className="icon" />
                   <span>{room.name}</span>
                 </div>
-                {room.joinState === 'member' ? (
-                  <div className="room-card-meta">
-                    <span>
-                      <Icon name="users" size={12} />
-                      {room.memberCount} member{room.memberCount === 1 ? '' : 's'}
-                    </span>
-                    <span>
-                      <span className={`member-dot${room.onlineCount > 0 ? ' on' : ''}`} />
-                      {room.onlineCount} online
-                    </span>
-                    {room.isCreator && (
-                      <span className="room-card-badge">
-                        <Icon name="crown" size={10} />
-                        creator
-                      </span>
-                    )}
-                    <span className={`room-card-badge${room.transport === 'vpn' ? ' warn' : ''}`}>
-                      <Icon name={room.transport === 'vpn' ? 'globe' : 'zap'} size={10} />
-                      {room.transport}
-                    </span>
-                  </div>
-                ) : (
-                  <div className="room-card-meta">
-                    {room.joinState === 'pending' ? (
-                      <>
-                        <span>
-                          <span className="spinner small" />
-                          Application pending
-                        </span>
-                        <span>
-                          <Icon name="users" size={12} />
-                          members unavailable
-                        </span>
-                      </>
-                    ) : (
-                      <span>
-                        <Icon name="xCircle" size={12} />
-                        Application rejected{room.appReason ? ` — ${room.appReason}` : ''}
-                      </span>
-                    )}
-                    <button
-                      className="btn ghost small"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        void bridge?.call('room:pendingDismiss', { code: room.code }).then(() => refreshRooms())
-                      }}
-                    >
-                      <Icon name="trash" size={11} />
-                      Remove
-                    </button>
-                  </div>
-                )}
-                {room.joinState === 'member' && (
-                  <span className="room-card-chevron">
-                    <Icon name="chevronRight" size={16} />
+                <div className="room-card-meta">
+                  <span>
+                    <Icon name="users" size={12} />
+                    {room.memberCount} member{room.memberCount === 1 ? '' : 's'}
                   </span>
-                )}
+                  <span>
+                    <span className={`member-dot${room.onlineCount > 0 ? ' on' : ''}`} />
+                    {room.onlineCount} online
+                  </span>
+                  {room.isCreator && (
+                    <span className="room-card-badge">
+                      <Icon name="crown" size={10} />
+                      creator
+                    </span>
+                  )}
+                  <span className={`room-card-badge${room.transport === 'vpn' ? ' warn' : ''}`}>
+                    <Icon name={room.transport === 'vpn' ? 'globe' : 'zap'} size={10} />
+                    {room.transport}
+                  </span>
+                </div>
+                <span className="room-card-chevron">
+                  <Icon name="chevronRight" size={16} />
+                </span>
               </div>
             ))}
           </div>
         )}
       </div>
+      {reasonFor && (
+        <Modal
+          title="Join room"
+          icon="arrowRight"
+          onClose={() => setReasonFor(null)}
+          footer={
+            <>
+              <button className="btn" onClick={() => setReasonFor(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn primary"
+                disabled={joinReason.trim().length === 0 || busy}
+                onClick={() => {
+                  const code = reasonFor
+                  const inviteId = reasonInviteId.current
+                  setReasonFor(null)
+                  join(code, joinReason, inviteId ?? undefined)
+                }}
+              >
+                <Icon name="arrowRight" size={13} />
+                Join
+              </button>
+            </>
+          }
+        >
+          <div className="field">
+            <span className="field-label">Room code</span>
+            <code style={{ fontSize: 12.5 }}>{reasonFor}</code>
+          </div>
+          <div className="field">
+            <span className="field-label">
+              Why do you want to join? (recorded in the room's join log for the staff)
+            </span>
+            <input
+              value={joinReason}
+              maxLength={500}
+              placeholder="Required — e.g. invited by a friend for movie night"
+              autoFocus
+              onChange={(e) => setJoinReason(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && joinReason.trim().length > 0) {
+                  const code = reasonFor
+                  const inviteId = reasonInviteId.current
+                  setReasonFor(null)
+                  join(code, joinReason, inviteId ?? undefined)
+                }
+              }}
+            />
+          </div>
+          <p style={{ fontSize: 12, color: 'var(--text-faint)', margin: 0 }}>
+            You join instantly — the reason is for the room's staff log, not an approval.
+          </p>
+        </Modal>
+      )}
       {creating && (
         <CreateRoomModal
           onClose={() => setCreating(false)}
