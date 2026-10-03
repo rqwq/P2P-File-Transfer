@@ -52,6 +52,12 @@ jobs:
       - name: Check obfuscated build output
         run: npm run check:build
 
+      # End-to-end test of the transfer engine (real protocol + noise
+      # streams + file I/O, no Electron) — guards the offer → beginFile →
+      # chunks → acks → completion path on every release.
+      - name: Transfer engine test
+        run: npm run test:transfer
+
       - name: Set version (base from package.json + run number)
         shell: pwsh
         run: |

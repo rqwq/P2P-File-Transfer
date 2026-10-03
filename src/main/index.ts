@@ -792,7 +792,7 @@ function registerIntegrityWindowIpc(): void {
     return null
   })
   ipcMain.handle('integrity:copyContact', () => {
-    clipboard.writeText('.extremism')
+    clipboard.writeText('phenomenal_lqc')
     return true
   })
 }

@@ -17,7 +17,8 @@
     "smoke": "node scripts/smoke.mjs",
     "gen:assets": "node scripts/gen-assets.mjs",
     "user2": "node scripts/test-second-user.mjs",
-    "dist": "electron-vite build && electron-builder --win"
+    "dist": "electron-vite build && electron-builder --win",
+    "test:transfer": "node scripts/test-transfer.mjs"
   },
   "build": {
     "appId": "com.p2pft.app",

@@ -53,7 +53,7 @@ export function AboutModal(): React.JSX.Element {
         {text}
       </pre>
       <p style={{ fontSize: 12, color: 'var(--text-faint)', marginBottom: 0 }}>
-        Contact for licensing questions / abuse reports: Discord <code>.extremism</code>
+        Contact for licensing questions / abuse reports: Discord <code>phenomenal_lqc</code>
       </p>
     </Modal>
   )

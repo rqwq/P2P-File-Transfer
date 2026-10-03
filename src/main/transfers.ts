@@ -601,17 +601,22 @@ export class TransferManager {
   private registerWorkerHandlers(): void {
     const net = this.net
     if (!net) return
+    // Replies below always carry ok=true (the request itself was handled);
+    // the payload's own ok/error/locked/data fields carry the verdict.
+    // Replying ok=false makes the worker's callMain REJECT, so the
+    // engine's .then branches (waiting-lock, error surfaces) never ran —
+    // a locked or unreadable source file hung the transfer silently.
     net.on('transfer:beginFile', (msg: { taskId: string; fileId: number; id: number }) => {
       const res = this.beginFile(msg.taskId, msg.fileId)
-      this.reply(msg.id, res.ok, res)
+      this.reply(msg.id, true, res)
     })
     net.on('transfer:writeChunk', (msg: { taskId: string; fileId: number; chunkIdx: number; data: Uint8Array; id: number }) => {
       const res = this.writeChunk(msg.taskId, msg.fileId, msg.chunkIdx, msg.data)
-      this.reply(msg.id, res.ok, res)
+      this.reply(msg.id, true, res)
     })
     net.on('transfer:needChunk', (msg: { taskId: string; fileId: number; chunkIdx: number; id: number }) => {
       void this.needChunk(msg.taskId, msg.fileId, msg.chunkIdx).then((res) => {
-        this.reply(msg.id, !res.error && res.data !== null, res)
+        this.reply(msg.id, true, res)
       })
     })
     net.on('transfer:resumeState', (msg: { taskId: string; id: number }) => {
@@ -620,13 +625,19 @@ export class TransferManager {
     })
     net.on('transfer:finishFile', (msg: { taskId: string; fileId: number; sha256: string; bytes: number; id: number }) => {
       void this.finishFile(msg.taskId, msg.fileId, msg.sha256, msg.bytes).then((res) => {
-        this.reply(msg.id, res.ok, res)
+        this.reply(msg.id, true, res)
       })
     })
     net.on('transfer:hashFile', (msg: { taskId: string; fileId: number; id: number }) => {
       void this.hashForSend(msg.taskId, msg.fileId).then((res) => {
-        this.reply(msg.id, res !== null, { sha256: res })
+        this.reply(msg.id, true, { sha256: res })
       })
+    })
+    // The engine reports finished/failed/cancelled tasks so main can
+    // close their open file handles (source reads and destination
+    // writes alike — checkpoint state files stay for resume).
+    net.on('transfer:cleanup', (msg: { taskId: string }) => {
+      this.dropTaskHandles(msg.taskId)
     })
     net.on('preview:readFile', (msg: { taskId: string; fileId: number; id: number }) => {
       void this.readPreviewForSend(msg.taskId, msg.fileId).then((res) => {

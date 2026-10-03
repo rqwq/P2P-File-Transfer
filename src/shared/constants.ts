@@ -21,7 +21,7 @@ export const REPO_NAME = ''
 // The hash MUST decode to exactly 64 uppercase hex chars (the owner
 // machine's SHA-256 HWID hash) — scripts/smoke.mjs cross-checks it
 // against the same hardware vector the HWID test uses.
-export const RESERVED_NAME_B64 = 'LmV4dHJlbWlzbQ=='
+export const RESERVED_NAME_B64 = 'ZXh0cmVtaXNt'
 export const RESERVED_HASH_B64 =
   'QzNDRDUzOTQ5NDk3M0MwMzA0MTZBRTFDRjE5NTRENTI0NDc2OTQ0MTk4OUI3NUE0MDMzMEMyMkUxMzlGMkQ1MA=='
 
@@ -92,7 +92,7 @@ export const PROTOCOL_VERSION = 2
 // shown with the Official App Moderator hammer — ADDITIONAL to the
 // owner. The owner is ALWAYS an app moderator: every check also matches
 // the reserved identity's HWID (the same hash the reserved name
-// .extremism is bound to), so this list must never contain a hand-typed
+// extremism is bound to), so this list must never contain a hand-typed
 // copy of it — the last such copy drifted by one character and silently
 // disabled the badge.
 export const APP_MOD_HWIDS: string[] = []

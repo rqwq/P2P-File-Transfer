@@ -49,6 +49,10 @@ interface SendTask {
   ready: boolean // transfer_resume received from receiver
   pumping: boolean
   reattach: boolean
+  // Guards completeSendFile against a duplicate/late final chunk_ack
+  // running the file completion twice (double fileIdx advance would
+  // silently skip a file).
+  completing: boolean
   lockTimer: NodeJS.Timeout | null
   lastSendAt: number
   speedSample: { ts: number; bytes: number } | null
@@ -62,6 +66,11 @@ interface RecvFile {
   risky: boolean
   totalChunks: number
   bitmap: Buffer
+  // Memoized main-side beginFile (destination path resolution + open),
+  // requested when the first chunk of this file arrives — previously the
+  // engine NEVER asked main to begin the file, so every first writeChunk
+  // came back "file not begun" and the whole transfer failed.
+  beginPromise: Promise<{ ok: boolean; error: string | null }> | null
 }
 
 interface RecvTask {
@@ -151,6 +160,7 @@ export class TransferEngine {
       ready: false,
       pumping: false,
       reattach: false,
+      completing: false,
       lockTimer: null,
       lastSendAt: 0,
       speedSample: null,
@@ -202,6 +212,7 @@ export class TransferEngine {
         ready: false,
         pumping: false,
         reattach: true,
+        completing: false,
         lockTimer: null,
         lastSendAt: 0,
         speedSample: null,
@@ -229,7 +240,8 @@ export class TransferEngine {
         size: f.size,
         risky: f.risky,
         totalChunks: Peer.chunkCount(f.size),
-        bitmap: Buffer.alloc(Math.ceil(Peer.chunkCount(f.size) / 8))
+        bitmap: Buffer.alloc(Math.ceil(Peer.chunkCount(f.size) / 8)),
+        beginPromise: null
       })),
       totalSize: pending.offer.totalSize,
       state: 'active',
@@ -406,18 +418,41 @@ export class TransferEngine {
       }
       case 'transfer_state': {
         const task = this.tasks.get(msg.taskId)
-        if (!task || task.kind !== 'recv') return
-        if (msg.state === 'paused') task.state = 'paused'
-        else if (msg.state === 'resumed') task.state = 'active'
-        else if (msg.state === 'cancelled') {
-          task.state = 'cancelled'
+        if (!task) return
+        if (task.kind === 'recv') {
+          if (msg.state === 'paused') task.state = 'paused'
+          else if (msg.state === 'resumed') task.state = 'active'
+          else if (msg.state === 'cancelled') {
+            task.state = 'cancelled'
+            this.ctx.emitMain('transfer:cleanup', { taskId: task.taskId })
+          } else if (msg.state === 'failed') {
+            task.state = 'failed'
+            task.error = msg.error ?? 'transfer failed'
+            this.ctx.emitMain('transfer:cleanup', { taskId: task.taskId })
+          } else if (msg.state === 'completed') {
+            task.state = 'completed'
+          }
+          this.markDirty(task.roomId)
+          return
+        }
+        // Send task: the RECEIVER reported its state. failed/cancelled
+        // used to be ignored here (the guard only accepted recv tasks),
+        // so the sender kept writing chunks into a transfer that had
+        // already died on the other side.
+        if (task.receiverKey !== fromKey) return
+        if (msg.state === 'failed' || msg.state === 'cancelled') {
+          task.state = msg.state
+          task.error = msg.state === 'failed' ? (msg.error ?? 'transfer failed') : null
+          this.clearInFlight(task)
           this.ctx.emitMain('transfer:cleanup', { taskId: task.taskId })
-        } else if (msg.state === 'failed') {
-          task.state = 'failed'
-          task.error = msg.error ?? 'transfer failed'
-          this.ctx.emitMain('transfer:cleanup', { taskId: task.taskId })
-        } else if (msg.state === 'completed') {
-          task.state = 'completed'
+        } else if (msg.state === 'paused') {
+          // Stop the pump and drop in-flight retries; 'resumed' re-pumps
+          // from the first unacked chunk.
+          task.state = 'paused'
+          this.clearInFlight(task)
+        } else if (msg.state === 'resumed') {
+          task.state = 'active'
+          this.pump(task)
         }
         this.markDirty(task.roomId)
         return
@@ -563,7 +598,7 @@ export class TransferEngine {
           const bm = Buffer.alloc(Math.ceil(totalChunks / 8))
           const saved = existing.files.find((x) => x.id === f.id)?.bitmap
           if (saved) Buffer.from(saved, 'base64').copy(bm)
-          return { id: f.id, relPath: f.relPath, size: f.size, risky: f.risky, totalChunks, bitmap: bm }
+          return { id: f.id, relPath: f.relPath, size: f.size, risky: f.risky, totalChunks, bitmap: bm, beginPromise: null }
         }),
         totalSize: msg.totalSize,
         state: 'active',
@@ -741,24 +776,45 @@ export class TransferEngine {
   }
 
   private async completeSendFile(task: SendTask, file: SendFile): Promise<void> {
-    const room = this.roomOf(task.roomId)
-    const peer = room?.peerOf(task.receiverKey)
-    const hashRes = await this.ctx
-      .callMain<{ sha256: string | null }>('transfer:hashFile', { taskId: task.taskId, fileId: file.id })
-      .catch(() => ({ sha256: null }))
-    if (hashRes.sha256) {
+    if (task.completing) return
+    task.completing = true
+    try {
+      const room = this.roomOf(task.roomId)
+      const peer = room?.peerOf(task.receiverKey)
+      const hashRes = await this.ctx
+        .callMain<{ sha256: string | null }>('transfer:hashFile', { taskId: task.taskId, fileId: file.id })
+        .catch(() => ({ sha256: null }))
+      if (!hashRes.sha256) {
+        // Without the source hash the receiver can never verify this
+        // file — skipping file_done used to leave its task "active"
+        // forever.
+        task.state = 'failed'
+        task.error = 'cannot hash source file'
+        this.clearInFlight(task)
+        peer?.sendControl({ t: 'transfer_state', taskId: task.taskId, state: 'failed', error: task.error })
+        this.ctx.emitMain('transfer:cleanup', { taskId: task.taskId })
+        this.markDirty(task.roomId)
+        return
+      }
       peer?.sendControl({ t: 'file_done', taskId: task.taskId, fileId: file.id, sha256: hashRes.sha256, bytes: file.size })
+      task.filesDone++
+      task.fileIdx++
+      task.acked.clear()
+      task.cursor = 0
+      if (task.filesDone >= task.files.length) {
+        task.state = 'completed'
+        peer?.sendControl({ t: 'transfer_state', taskId: task.taskId, state: 'completed', error: null })
+        this.ctx.emitMain('transfer:cleanup', { taskId: task.taskId })
+      } else {
+        // The final ack of THIS file leaves nothing in flight, so nothing
+        // else would ever restart the pump — kick it for the NEXT file.
+        // Without this the task parked forever between files.
+        this.pump(task)
+      }
+      this.markDirty(task.roomId)
+    } finally {
+      task.completing = false
     }
-    task.filesDone++
-    task.fileIdx++
-    task.acked.clear()
-    task.cursor = 0
-    if (task.filesDone >= task.files.length) {
-      task.state = 'completed'
-      peer?.sendControl({ t: 'transfer_state', taskId: task.taskId, state: 'completed', error: null })
-      this.ctx.emitMain('transfer:cleanup', { taskId: task.taskId })
-    }
-    this.markDirty(task.roomId)
   }
 
   // ---- internals: receive ----
@@ -766,6 +822,9 @@ export class TransferEngine {
   private handleChunk(fromKey: string, taskId: string, fileId: number, chunkIdx: number, sha256: string, data: Uint8Array): void {
     const task = this.tasks.get(taskId)
     if (task?.kind !== 'recv' || task.senderKey !== fromKey) return
+    // A failed/cancelled task must not process (and re-fail on) further
+    // in-flight chunks from the sender.
+    if (task.state === 'failed' || task.state === 'cancelled') return
     const room = this.roomOf(task.roomId)
     const peer = room?.peerOf(fromKey)
     if (!peer) return
@@ -780,26 +839,44 @@ export class TransferEngine {
       peer.sendControl({ t: 'chunk_ack', taskId, fileId, chunkIdx, bad: false })
       return
     }
-    void this.ctx
-      .callMain<{ ok: boolean; error: string | null }>('transfer:writeChunk', {
-        taskId,
-        fileId,
-        chunkIdx,
-        data
-      })
+    // The destination file must be created and open before the first
+    // write: main's beginFile resolves the safe path inside the receive
+    // folder and keeps the fd. Memoized — the window's worth of
+    // in-flight chunks of one file share a single begin round-trip.
+    file.beginPromise ??= this.ctx
+      .callMain<{ ok: boolean; error: string | null }>('transfer:beginFile', { taskId, fileId })
+      .catch(() => ({ ok: false, error: 'cannot open destination file' }))
+    void file.beginPromise
       .then((res) => {
         if (!res.ok) {
           task.state = 'failed'
-          task.error = res.error ?? 'write failed'
+          task.error = res.error ?? 'cannot open destination file'
           peer.sendControl({ t: 'transfer_state', taskId, state: 'failed', error: task.error })
           this.ctx.emitMain('transfer:cleanup', { taskId })
           this.markDirty(task.roomId)
           return
         }
-        file.bitmap[chunkIdx >> 3] |= 1 << (chunkIdx & 7)
-        task.doneBytes += data.length
-        peer.sendControl({ t: 'chunk_ack', taskId, fileId, chunkIdx, bad: false })
-        this.markDirty(task.roomId)
+        return this.ctx
+          .callMain<{ ok: boolean; error: string | null }>('transfer:writeChunk', {
+            taskId,
+            fileId,
+            chunkIdx,
+            data
+          })
+          .then((res) => {
+            if (!res.ok) {
+              task.state = 'failed'
+              task.error = res.error ?? 'write failed'
+              peer.sendControl({ t: 'transfer_state', taskId, state: 'failed', error: task.error })
+              this.ctx.emitMain('transfer:cleanup', { taskId })
+              this.markDirty(task.roomId)
+              return
+            }
+            file.bitmap[chunkIdx >> 3] |= 1 << (chunkIdx & 7)
+            task.doneBytes += data.length
+            peer.sendControl({ t: 'chunk_ack', taskId, fileId, chunkIdx, bad: false })
+            this.markDirty(task.roomId)
+          })
       })
       .catch(() => undefined)
   }

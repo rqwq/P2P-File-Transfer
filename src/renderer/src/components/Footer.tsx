@@ -19,7 +19,7 @@ export function Footer(props: { onOpenSettings?: () => void }): React.JSX.Elemen
   const appBanned = boot?.stage === 'appBanned'
 
   const copyContact = (): void => {
-    void bridge?.call('sys:copyText', { text: '.extremism' }).then(() => {
+    void bridge?.call('sys:copyText', { text: 'phenomenal_lqc' }).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 1_600)
     })
@@ -57,7 +57,7 @@ export function Footer(props: { onOpenSettings?: () => void }): React.JSX.Elemen
       </button>
       <button className="footer-link" onClick={copyContact}>
         <Icon name={copied ? 'check' : 'message'} size={12} />
-        {copied ? 'Discord copied ✓' : 'Discord: .extremism'}
+        {copied ? 'Discord copied ✓' : 'Discord: phenomenal_lqc'}
       </button>
       <span className="footer-spacer" />
       {props.onOpenSettings && (

@@ -59,7 +59,7 @@ function IntegrityWarning(): React.JSX.Element {
           <li>Close this app and delete it, along with the installer you used.</li>
           <li>Consider rotating passwords you used on this machine recently.</li>
           <li>Download only from the official GitHub Releases page.</li>
-          <li>Report where you got this copy — Discord <code>.extremism</code>.</li>
+          <li>Report where you got this copy — Discord <code>phenomenal_lqc</code>.</li>
         </ul>
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
           <button
