@@ -1,0 +1,14 @@
+node_modules/
+out/
+dist/
+.test-users/
+*.local
+.dev-run*.txt
+.npm-install.log
+.DS_Store
+Thumbs.db
+scripts/.smoke-tmp/
+.devcheck.txt
+.devrun.log
+.zcode/
+.zcodeignore
